@@ -3,6 +3,7 @@ import csv
 import json
 import subprocess
 import time
+from collections import defaultdict
 
 from sklearn.metrics import (
     accuracy_score,
@@ -45,12 +46,93 @@ GROUND_TRUTH = {
 }
 
 
+# ============================================================
+# DIFFICULT-CONDITION LABELS
+# ============================================================
+
+VIDEO_CONDITIONS = {
+    "clip_01.mp4": [
+        "Day",
+        "Fail braking",
+        "Accident",
+    ],
+
+    "clip_02.mp4": [
+        "Night",
+        "Fail braking",
+        "Accident",
+    ],
+
+    "clip_03.mp4": [
+        "Day",
+        "Accident",
+    ],
+
+    "clip_04.mp4": [
+        "Day",
+        "Accident",
+    ],
+
+    "clip_05.mp4": [
+        "Day",
+        "Fail braking",
+        "Accident",
+    ],
+
+    "clip_06.mp4": [
+        "Night",
+        "Near accident",
+        "Accident",
+    ],
+
+    "clip_07.mp4": [
+        "Night",
+        "Near accident",
+        "Accident",
+        "Normal turning",
+    ],
+
+    "clip_08.mp4": [
+        "Day",
+        "Normal braking",
+        "Near accident",
+        "Accident",
+        "Normal turning",
+    ],
+
+    "clip_09.mp4": [
+        "Night",
+        "Normal braking",
+        "Near accident",
+        "Accident",
+        "Normal turning",
+    ],
+
+    "clip_10.mp4": [
+        "Night",
+        "Normal braking",
+        "Near accident",
+        "Accident",
+        "Normal turning",
+    ],
+
+    "clip_11.mp4": [
+        "Day",
+        "No accident",
+        "Heavy traffic",
+    ],
+}
+
+
 def run_video(video_path):
     """
-    Run the ML pipeline and read its structured JSON result.
+    Run ML and read the structured JSON result.
     """
 
-    json_output = ML_DIR / f"evaluation_{video_path.stem}.json"
+    json_output = (
+        ML_DIR
+        / f"evaluation_{video_path.stem}.json"
+    )
 
     command = [
         str(PYTHON),
@@ -75,23 +157,36 @@ def run_video(video_path):
     elapsed = time.perf_counter() - start
 
     if result.returncode != 0:
-        print(f"\nERROR processing {video_path.name}")
+        print(
+            f"\nERROR processing "
+            f"{video_path.name}"
+        )
+
         print(result.stderr)
 
         return {
             "predicted": None,
             "confidence": 0.0,
-            "processing_seconds": round(elapsed, 3),
+            "processing_seconds": round(
+                elapsed,
+                3,
+            ),
             "events": 0,
         }
 
     if not json_output.exists():
-        print(f"\nERROR: JSON result not created for {video_path.name}")
+        print(
+            f"\nERROR: JSON result not created "
+            f"for {video_path.name}"
+        )
 
         return {
             "predicted": None,
             "confidence": 0.0,
-            "processing_seconds": round(elapsed, 3),
+            "processing_seconds": round(
+                elapsed,
+                3,
+            ),
             "events": 0,
         }
 
@@ -102,25 +197,40 @@ def run_video(video_path):
             )
         )
 
-        events = data.get("events", [])
+        events = data.get(
+            "events",
+            [],
+        )
 
         predicted = (
-            1 if data.get("accident_detected", False)
+            1
+            if data.get(
+                "accident_detected",
+                False,
+            )
             else 0
         )
 
-        # Use the strongest detected event confidence.
         confidence = 0.0
 
         if events:
             confidence = max(
-                float(event.get("confidence", 0.0))
+                float(
+                    event.get(
+                        "confidence",
+                        0.0,
+                    )
+                )
                 for event in events
             )
 
-        # Prefer the processing time reported by the ML pipeline.
-        pipeline_time = data.get("metrics", {}).get(
-            "processing_seconds"
+        pipeline_time = (
+            data.get(
+                "metrics",
+                {},
+            ).get(
+                "processing_seconds"
+            )
         )
 
         processing_seconds = (
@@ -131,7 +241,10 @@ def run_video(video_path):
 
         return {
             "predicted": predicted,
-            "confidence": round(confidence, 4),
+            "confidence": round(
+                confidence,
+                4,
+            ),
             "processing_seconds": round(
                 processing_seconds,
                 3,
@@ -139,7 +252,12 @@ def run_video(video_path):
             "events": len(events),
         }
 
-    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+    except (
+        json.JSONDecodeError,
+        ValueError,
+        TypeError,
+    ) as exc:
+
         print(
             f"\nERROR reading JSON for "
             f"{video_path.name}: {exc}"
@@ -148,20 +266,27 @@ def run_video(video_path):
         return {
             "predicted": None,
             "confidence": 0.0,
-            "processing_seconds": round(elapsed, 3),
+            "processing_seconds": round(
+                elapsed,
+                3,
+            ),
             "events": 0,
         }
 
     finally:
-        # Remove temporary JSON file.
         try:
-            json_output.unlink(missing_ok=True)
+            json_output.unlink(
+                missing_ok=True
+            )
         except OSError:
             pass
 
 
 def main():
-    videos = sorted(VIDEO_DIR.glob("*.mp4"))
+
+    videos = sorted(
+        VIDEO_DIR.glob("*.mp4")
+    )
 
     if not videos:
         print("No videos found.")
@@ -170,41 +295,80 @@ def main():
     rows = []
 
     print()
-    print("=" * 60)
-    print("        ACCIDENT DETECTION EVALUATION")
-    print("=" * 60)
+    print("=" * 70)
+    print("        ACCIDENT DETECTION - DIFFICULT CONDITIONS")
+    print("=" * 70)
+
+    # ========================================================
+    # PROCESS ALL VIDEOS
+    # ========================================================
 
     for video in videos:
 
+        actual = GROUND_TRUTH.get(
+            video.name
+        )
+
+        conditions = VIDEO_CONDITIONS.get(
+            video.name,
+            [],
+        )
+
         print()
         print(f"Processing: {video.name}")
-
-        actual = GROUND_TRUTH.get(video.name)
-
-        if actual is None:
-            print("Actual label: NOT SET")
-        else:
-            print(f"Actual: {actual}")
+        print(
+            "Conditions: "
+            + ", ".join(conditions)
+        )
+        print(f"Actual: {actual}")
 
         result = run_video(video)
 
-        print(f"Predicted: {result['predicted']}")
-        print(f"Confidence: {result['confidence']}")
-        print(f"Events: {result['events']}")
+        predicted = result[
+            "predicted"
+        ]
+
+        confidence = result[
+            "confidence"
+        ]
+
+        processing_seconds = result[
+            "processing_seconds"
+        ]
+
+        events = result[
+            "events"
+        ]
+
+        print(
+            f"Predicted: {predicted}"
+        )
+
+        print(
+            f"Confidence: {confidence}"
+        )
+
+        print(
+            f"Events: {events}"
+        )
+
         print(
             f"Time: "
-            f"{result['processing_seconds']:.3f} sec"
+            f"{processing_seconds:.3f} sec"
         )
 
         rows.append({
             "video": video.name,
+            "conditions": "; ".join(
+                conditions
+            ),
             "actual": actual,
-            "predicted": result["predicted"],
-            "confidence": result["confidence"],
-            "processing_seconds": result[
-                "processing_seconds"
-            ],
-            "events": result["events"],
+            "predicted": predicted,
+            "confidence": confidence,
+            "processing_seconds": (
+                processing_seconds
+            ),
+            "events": events,
         })
 
     # ========================================================
@@ -222,6 +386,7 @@ def main():
             f,
             fieldnames=[
                 "video",
+                "conditions",
                 "actual",
                 "predicted",
                 "confidence",
@@ -234,14 +399,14 @@ def main():
         writer.writerows(rows)
 
     print()
-    print("=" * 60)
+    print("=" * 70)
     print("CSV CREATED")
-    print("=" * 60)
+    print("=" * 70)
 
     print(OUTPUT_CSV)
 
     # ========================================================
-    # EVALUATION
+    # OVERALL EVALUATION
     # ========================================================
 
     valid_rows = [
@@ -252,7 +417,9 @@ def main():
     ]
 
     if not valid_rows:
-        print("\nNo valid labeled results available.")
+        print(
+            "\nNo valid labeled results."
+        )
         return
 
     y_true = [
@@ -296,57 +463,66 @@ def main():
 
     true_negative = matrix[0][0]
     false_positive = matrix[0][1]
+
     false_negative = matrix[1][0]
     true_positive = matrix[1][1]
 
-    average_time = sum(
-        row["processing_seconds"]
-        for row in valid_rows
-    ) / len(valid_rows)
-
-    # ========================================================
-    # PRINT FINAL RESULTS
-    # ========================================================
+    average_time = (
+        sum(
+            row["processing_seconds"]
+            for row in valid_rows
+        )
+        / len(valid_rows)
+    )
 
     print()
-    print("=" * 60)
-    print("              EVALUATION RESULTS")
-    print("=" * 60)
+    print("=" * 70)
+    print("                 OVERALL RESULTS")
+    print("=" * 70)
 
     print(
-        f"Videos evaluated : {len(valid_rows)}"
+        f"Videos evaluated : "
+        f"{len(valid_rows)}"
     )
 
     print(
-        f"Accuracy         : {accuracy:.4f}"
+        f"Accuracy         : "
+        f"{accuracy:.4f}"
     )
 
     print(
-        f"Precision        : {precision:.4f}"
+        f"Precision        : "
+        f"{precision:.4f}"
     )
 
     print(
-        f"Recall           : {recall:.4f}"
+        f"Recall           : "
+        f"{recall:.4f}"
     )
 
     print(
-        f"F1-score         : {f1:.4f}"
+        f"F1-score         : "
+        f"{f1:.4f}"
     )
 
     print(
-        f"True positives   : {true_positive}"
+        f"True positives   : "
+        f"{true_positive}"
     )
 
     print(
-        f"True negatives   : {true_negative}"
+        f"True negatives   : "
+        f"{true_negative}"
     )
 
     print(
-        f"False positives  : {false_positive}"
+        f"False positives  : "
+        f"{false_positive}"
     )
 
     print(
-        f"False negatives  : {false_negative}"
+        f"False negatives  : "
+        f"{false_negative}"
     )
 
     print()
@@ -358,6 +534,110 @@ def main():
         f"Average processing time: "
         f"{average_time:.3f} sec"
     )
+
+    # ========================================================
+    # CONDITION-WISE ANALYSIS
+    # ========================================================
+
+    condition_rows = defaultdict(list)
+
+    for row in valid_rows:
+
+        conditions = [
+            item.strip()
+            for item in row[
+                "conditions"
+            ].split(";")
+            if item.strip()
+        ]
+
+        for condition in conditions:
+            condition_rows[
+                condition
+            ].append(row)
+
+    print()
+    print("=" * 70)
+    print("             CONDITION-WISE RESULTS")
+    print("=" * 70)
+
+    for condition in sorted(
+        condition_rows
+    ):
+
+        condition_data = (
+            condition_rows[
+                condition
+            ]
+        )
+
+        condition_true = [
+            int(row["actual"])
+            for row in condition_data
+        ]
+
+        condition_pred = [
+            int(row["predicted"])
+            for row in condition_data
+        ]
+
+        correct = sum(
+            actual == predicted
+            for actual, predicted
+            in zip(
+                condition_true,
+                condition_pred,
+            )
+        )
+
+        condition_accuracy = (
+            correct / len(condition_data)
+        )
+
+        fp = sum(
+            actual == 0
+            and predicted == 1
+            for actual, predicted
+            in zip(
+                condition_true,
+                condition_pred,
+            )
+        )
+
+        fn = sum(
+            actual == 1
+            and predicted == 0
+            for actual, predicted
+            in zip(
+                condition_true,
+                condition_pred,
+            )
+        )
+
+        print()
+        print(
+            f"{condition}"
+        )
+
+        print(
+            f"  Videos    : "
+            f"{len(condition_data)}"
+        )
+
+        print(
+            f"  Accuracy  : "
+            f"{condition_accuracy:.4f}"
+        )
+
+        print(
+            f"  FP        : "
+            f"{fp}"
+        )
+
+        print(
+            f"  FN        : "
+            f"{fn}"
+        )
 
 
 if __name__ == "__main__":
