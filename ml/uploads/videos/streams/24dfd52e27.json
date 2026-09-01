@@ -1,0 +1,10 @@
+{
+  "status": "completed",
+  "camera_id": "CAM_001",
+  "source": "D:\\Btech-project\\sample_videos\\clip_01.mp4",
+  "frames_processed": 210,
+  "last_timestamp": 7.007000000000001,
+  "accident_detected": false,
+  "events": [],
+  "elapsed_seconds": 16.689366340637207
+}

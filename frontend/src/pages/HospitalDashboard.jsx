@@ -1,430 +1,758 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import {
+  Link,
+  useNavigate,
+} from "react-router-dom";
 
 import { api } from "../api";
-
 import Loading from "../components/Loading";
 import ErrorMessage from "../components/ErrorMessage";
 import MapView from "../components/MapView";
-
 import {
   formatConfidence,
   formatDate,
 } from "../utils";
 
 
-/* ============================================================
-   DISTANCE
-   ============================================================ */
-
 function distanceKm(
   lat1,
-  lng1,
+  lon1,
   lat2,
-  lng2
+  lon2
 ) {
-  const R = 6371;
+  const toRadians = (
+    value
+  ) => (
+    value * Math.PI
+  ) / 180;
 
-  const dLat =
-    ((lat2 - lat1) * Math.PI) /
-    180;
+  const earthRadius = 6371;
 
-  const dLng =
-    ((lng2 - lng1) * Math.PI) /
-    180;
+  const dLat = toRadians(
+    lat2 - lat1
+  );
+
+  const dLon = toRadians(
+    lon2 - lon1
+  );
 
   const a =
-    Math.sin(dLat / 2) ** 2 +
+    Math.sin(
+      dLat / 2
+    ) *
+      Math.sin(
+        dLat / 2
+      ) +
     Math.cos(
-      (lat1 * Math.PI) / 180
+      toRadians(lat1)
     ) *
       Math.cos(
-        (lat2 * Math.PI) / 180
+        toRadians(lat2)
       ) *
-      Math.sin(dLng / 2) ** 2;
+      Math.sin(
+        dLon / 2
+      ) *
+      Math.sin(
+        dLon / 2
+      );
 
-  return (
-    R *
+  const c =
     2 *
     Math.atan2(
       Math.sqrt(a),
       Math.sqrt(1 - a)
-    )
-  );
-}
+    );
 
-
-/* ============================================================
-   RESOURCE HELPERS
-   ============================================================ */
-
-function getBeds(hospital) {
-  return Number(
-    hospital?.resources?.beds_available ??
-      hospital?.beds_available ??
-      hospital?.beds ??
-      0
-  );
-}
-
-
-function getAmbulances(hospital) {
-  const small = Number(
-    hospital?.resources?.small_ambulances ??
-      hospital?.small_ambulances ??
-      0
-  );
-
-  const large = Number(
-    hospital?.resources?.large_ambulances ??
-      hospital?.large_ambulances ??
-      0
-  );
-
-  return small + large;
-}
-
-
-function getHospitalName(hospital) {
   return (
-    hospital?.name ||
-    hospital?.hospital_name ||
-    "Hospital"
+    earthRadius * c
   );
 }
 
 
-function isAvailable(hospital) {
-  if (
-    hospital?.emergency_available != null
-  ) {
-    return Boolean(
-      hospital.emergency_available
-    );
-  }
+// ============================================================
+// STATUS HELPERS
+// ============================================================
 
-  if (hospital?.status) {
-    return ![
-      "unavailable",
-      "offline",
-      "closed",
-      "full",
-      "busy",
-    ].includes(
-      String(hospital.status)
-        .trim()
-        .toLowerCase()
-    );
-  }
-
-  return true;
-}
+const TRACKING_STEPS = [
+  "RESPONSE_ACCEPTED",
+  "DISPATCHED",
+  "EN_ROUTE",
+  "ARRIVED",
+  "RESOLVED",
+];
 
 
-/* ============================================================
-   RANK HOSPITALS
-   ============================================================ */
-
-function rankHospitals(
-  incident,
-  hospitals
+function statusLabel(
+  status
 ) {
-  if (
-    incident?.latitude == null ||
-    incident?.longitude == null
-  ) {
-    return [];
-  }
+  const labels = {
+    RESPONSE_ACCEPTED:
+      "Response Accepted",
 
-  const accidentLat =
-    Number(incident.latitude);
+    DISPATCHED:
+      "Ambulance Dispatched",
 
-  const accidentLng =
-    Number(incident.longitude);
+    EN_ROUTE:
+      "Ambulance En Route",
 
-  if (
-    Number.isNaN(accidentLat) ||
-    Number.isNaN(accidentLng)
-  ) {
-    return [];
-  }
+    ARRIVED:
+      "Ambulance Arrived",
 
-  return hospitals
-    .filter(
-      (hospital) =>
-        hospital?.latitude != null &&
-        hospital?.longitude != null
-    )
-    .map((hospital) => {
-      const distance =
-        distanceKm(
-          accidentLat,
-          accidentLng,
-          Number(hospital.latitude),
-          Number(hospital.longitude)
-        );
+    RESOLVED:
+      "Case Resolved",
 
-      const beds =
-        getBeds(hospital);
+    REJECTED:
+      "Rejected",
 
-      const ambulances =
-        getAmbulances(hospital);
+    PENDING:
+      "Pending",
+  };
 
-      const available =
-        isAvailable(hospital);
-
-      /*
-       * Decision-support score.
-       *
-       * We prefer:
-       * - closer hospitals
-       * - more ambulances
-       * - more beds
-       * - currently available emergency service
-       */
-
-      const distanceScore =
-        Math.max(
-          0,
-          50 - distance * 5
-        );
-
-      const ambulanceScore =
-        Math.min(
-          20,
-          ambulances * 10
-        );
-
-      const bedScore =
-        Math.min(
-          20,
-          beds * 2
-        );
-
-      const availabilityScore =
-        available ? 10 : -100;
-
-      const score =
-        distanceScore +
-        ambulanceScore +
-        bedScore +
-        availabilityScore;
-
-      return {
-        ...hospital,
-
-        hospital_name:
-          getHospitalName(hospital),
-
-        distance_km:
-          distance,
-
-        available_beds:
-          beds,
-
-        available_ambulances:
-          ambulances,
-
-        emergency_available:
-          available,
-
-        recommendation_score:
-          score,
-      };
-    })
-    .sort(
-      (a, b) =>
-        b.recommendation_score -
-        a.recommendation_score
-    );
+  return (
+    labels[status] ||
+    status ||
+    "Unknown"
+  );
 }
 
 
-/* ============================================================
-   COMPONENT
-   ============================================================ */
+function stepIndex(
+  status
+) {
+  const index =
+    TRACKING_STEPS.indexOf(
+      status
+    );
+
+  return index >= 0
+    ? index
+    : 0;
+}
+
+
+function isActiveCase(
+  status
+) {
+  return [
+    "RESPONSE_ACCEPTED",
+    "DISPATCHED",
+    "EN_ROUTE",
+    "ARRIVED",
+  ].includes(
+    status
+  );
+}
+
+
+// ============================================================
+// TRACKING COMPONENT
+// ============================================================
+
+function CaseTracking({
+  status,
+}) {
+  const currentIndex =
+    stepIndex(status);
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: "0",
+        width: "100%",
+        marginTop: "18px",
+        marginBottom: "6px",
+      }}
+    >
+      {TRACKING_STEPS.map(
+        (
+          step,
+          index
+        ) => {
+
+          const completed =
+            index <
+            currentIndex;
+
+          const current =
+            index ===
+            currentIndex;
+
+          const pending =
+            index >
+            currentIndex;
+
+          return (
+            <div
+              key={step}
+              style={{
+                flex: 1,
+                position:
+                  "relative",
+                minWidth: 0,
+              }}
+            >
+
+              {index <
+                TRACKING_STEPS.length -
+                  1 && (
+                <div
+                  style={{
+                    position:
+                      "absolute",
+                    top: "11px",
+                    left: "50%",
+                    width: "100%",
+                    height: "2px",
+                    background:
+                      completed ||
+                      current
+                        ? "#22c55e"
+                        : "#e5e7eb",
+                    zIndex: 0,
+                  }}
+                />
+              )}
+
+              <div
+                style={{
+                  position:
+                    "relative",
+                  zIndex: 1,
+                  display:
+                    "flex",
+                  justifyContent:
+                    "center",
+                }}
+              >
+
+                <div
+                  style={{
+                    width:
+                      "24px",
+                    height:
+                      "24px",
+                    borderRadius:
+                      "50%",
+                    display:
+                      "flex",
+                    alignItems:
+                      "center",
+                    justifyContent:
+                      "center",
+                    fontSize:
+                      "12px",
+                    fontWeight:
+                      800,
+                    background:
+                      completed ||
+                      current
+                        ? "#22c55e"
+                        : "#ffffff",
+                    color:
+                      completed ||
+                      current
+                        ? "#ffffff"
+                        : "#64748b",
+                    border:
+                      pending
+                        ? "2px solid #dbe1e8"
+                        : "2px solid #22c55e",
+                    boxSizing:
+                      "border-box",
+                  }}
+                >
+                  {completed
+                    ? "✓"
+                    : index + 1}
+                </div>
+
+              </div>
+
+              <div
+                style={{
+                  textAlign:
+                    "center",
+                  marginTop:
+                    "8px",
+                  padding:
+                    "0 3px",
+                  fontSize:
+                    "10px",
+                  fontWeight:
+                    current
+                      ? 800
+                      : 600,
+                  color:
+                    current
+                      ? "#111827"
+                      : completed
+                        ? "#16a34a"
+                        : "#94a3b8",
+                  lineHeight:
+                    1.25,
+                }}
+              >
+                {statusLabel(
+                  step
+                )}
+              </div>
+
+            </div>
+          );
+        }
+      )}
+    </div>
+  );
+}
+
+
+// ============================================================
+// MAIN DASHBOARD
+// ============================================================
 
 export default function HospitalDashboard() {
-  const [hospital, setHospital] =
-    useState(null);
 
-  const [alerts, setAlerts] =
-    useState([]);
+  const navigate =
+    useNavigate();
 
-  const [stats, setStats] =
-    useState(null);
+  const [
+    hospital,
+    setHospital,
+  ] = useState(null);
 
-  const [availableHospitals, setAvailableHospitals] =
-    useState([]);
+  const [
+    alerts,
+    setAlerts,
+  ] = useState([]);
 
-  const [incidentDetails, setIncidentDetails] =
-    useState({});
+  const [
+    stats,
+    setStats,
+  ] = useState(null);
 
-  const [error, setError] =
-    useState("");
+  const [
+    availableHospitals,
+    setAvailableHospitals,
+  ] = useState([]);
 
-  const [loading, setLoading] =
-    useState(true);
+  const [
+    activeCases,
+    setActiveCases,
+  ] = useState([]);
+
+  const [
+    error,
+    setError,
+  ] = useState("");
+
+  const [
+    loading,
+    setLoading,
+  ] = useState(true);
 
 
-  /* ==========================================================
-     LOAD DATA
-     ========================================================== */
+  // ==========================================================
+  // LOAD PENDING ALERTS
+  // ==========================================================
 
-  async function load() {
+  async function loadPending() {
     try {
+
+      const pending =
+        await api.incidents.pending();
+
+      setAlerts(
+        Array.isArray(
+          pending
+        )
+          ? pending
+          : []
+      );
+
+    } catch (e) {
+
+      console.error(
+        "Pending incident poll failed:",
+        e
+      );
+    }
+  }
+
+
+  // ==========================================================
+  // LOAD ACTIVE ACCEPTED CASES
+  // ==========================================================
+
+  async function loadActiveCases() {
+
+    try {
+
+      const history =
+        await api.incidents.history();
+
+      if (
+        !Array.isArray(
+          history
+        )
+      ) {
+        setActiveCases(
+          []
+        );
+
+        return;
+      }
+
+      /*
+       * /hospital/history returns attendance records.
+       *
+       * Each accepted case contains incident_id.
+       *
+       * We then fetch the latest incident state so the
+       * dashboard can show:
+       *
+       * RESPONSE_ACCEPTED
+       * DISPATCHED
+       * EN_ROUTE
+       * ARRIVED
+       * RESOLVED
+       */
+
+      const detailedCases =
+        await Promise.all(
+          history.map(
+            async (
+              record
+            ) => {
+
+              if (
+                !record?.incident_id
+              ) {
+                return null;
+              }
+
+              try {
+
+                const incident =
+                  await api.incidents.get(
+                    record.incident_id
+                  );
+
+                return {
+                  ...record,
+                  ...incident,
+                };
+
+              } catch (e) {
+
+                console.error(
+                  "Could not load incident:",
+                  record.incident_id,
+                  e
+                );
+
+                return {
+                  ...record,
+                };
+              }
+            }
+          )
+        );
+
+      const active =
+        detailedCases
+          .filter(
+            Boolean
+          )
+          .filter(
+            (item) =>
+              isActiveCase(
+                item.status
+              )
+          );
+
+      setActiveCases(
+        active
+      );
+
+    } catch (e) {
+
+      console.error(
+        "Active cases loading failed:",
+        e
+      );
+    }
+  }
+
+
+  // ==========================================================
+  // FULL DASHBOARD LOAD
+  // ==========================================================
+
+  async function loadDashboard() {
+
+    try {
+
       setError("");
 
       const [
-        myHospital,
-        pendingAlerts,
-        hospitalStats,
-        hospitals,
+        hospitalData,
+        statsData,
+        hospitalsData,
       ] = await Promise.all([
         api.hospitals.me(),
-        api.incidents.pending(),
+
         api.incidents.stats(),
 
-        // IMPORTANT:
-        // Hospital users ARE allowed to call this endpoint.
         api.hospitals.available(),
       ]);
 
-      setHospital(myHospital);
-
-      setAlerts(
-        Array.isArray(pendingAlerts)
-          ? pendingAlerts
-          : []
+      setHospital(
+        hospitalData
       );
 
-      setStats(hospitalStats);
+      setStats(
+        statsData
+      );
 
       setAvailableHospitals(
-        Array.isArray(hospitals)
-          ? hospitals
+        Array.isArray(
+          hospitalsData
+        )
+          ? hospitalsData
           : []
       );
 
-
-      /* ======================================================
-         GET FULL INCIDENT DETAILS
-         ====================================================== */
-
-      const details = {};
-
-      await Promise.all(
-        pendingAlerts.map(
-          async (incident) => {
-            try {
-              const detail =
-                await api.incidents.get(
-                  incident.incident_id
-                );
-
-              details[
-                incident.incident_id
-              ] = detail;
-            } catch {
-              // Keep the pending alert if the
-              // detailed lookup fails.
-            }
-          }
-        )
-      );
-
-      setIncidentDetails(details);
+      await Promise.all([
+        loadPending(),
+        loadActiveCases(),
+      ]);
 
     } catch (e) {
-      setError(e.message);
+
+      setError(
+        e.message
+      );
+
     } finally {
-      setLoading(false);
+
+      setLoading(
+        false
+      );
     }
   }
 
 
-  /* ==========================================================
-     POLLING
-     ========================================================== */
+  // ==========================================================
+  // POLLING
+  // ==========================================================
 
   useEffect(() => {
-    load();
 
-    const interval = setInterval(
-      load,
-      3000
-    );
+    loadDashboard();
 
-    return () =>
-      clearInterval(interval);
+    /*
+     * Pending emergency alerts are polled quickly.
+     */
+    const pendingTimer =
+      setInterval(
+        loadPending,
+        750
+      );
+
+    /*
+     * Active accepted cases also need to update
+     * when ambulance status changes.
+     */
+    const activeCaseTimer =
+      setInterval(
+        loadActiveCases,
+        2000
+      );
+
+    /*
+     * Hospital resources/stats/map data can be slower.
+     */
+    const dashboardTimer =
+      setInterval(
+        loadDashboard,
+        5000
+      );
+
+    return () => {
+
+      clearInterval(
+        pendingTimer
+      );
+
+      clearInterval(
+        activeCaseTimer
+      );
+
+      clearInterval(
+        dashboardTimer
+      );
+    };
+
   }, []);
 
 
-  /* ==========================================================
-     ACCEPT
-     ========================================================== */
+  // ==========================================================
+  // ACTIVE INCIDENT
+  // ==========================================================
 
-  async function accept(id) {
-    try {
-      await api.incidents.accept(id);
-      await load();
-    } catch (e) {
-      setError(e.message);
-    }
-  }
+  const activeIncident =
+    alerts.length > 0
+      ? alerts[0]
+      : null;
 
 
-  /* ==========================================================
-     REJECT
-     ========================================================== */
+  // ==========================================================
+  // RECOMMENDED HOSPITAL
+  // ==========================================================
 
-  async function reject(id) {
-    try {
-      await api.incidents.reject(id);
-      await load();
-    } catch (e) {
-      setError(e.message);
-    }
-  }
-
-
-  /* ==========================================================
-     RECOMMENDATIONS
-     ========================================================== */
-
-  const recommendations =
+  const recommendedHospital =
     useMemo(() => {
-      const result = {};
 
-      alerts.forEach(
-        (alert) => {
-          const detail =
-            incidentDetails[
-              alert.incident_id
-            ] || alert;
+      if (
+        !activeIncident ||
+        activeIncident.latitude ==
+          null ||
+        activeIncident.longitude ==
+          null
+      ) {
+        return null;
+      }
 
-          result[
-            alert.incident_id
-          ] = rankHospitals(
-            detail,
-            availableHospitals
+      const candidates =
+        availableHospitals.filter(
+          (item) =>
+            item.latitude !=
+              null &&
+            item.longitude !=
+              null
+        );
+
+      if (
+        candidates.length === 0
+      ) {
+        return null;
+      }
+
+      let best = null;
+
+      for (
+        const hospitalItem
+        of candidates
+      ) {
+
+        const distance =
+          distanceKm(
+            Number(
+              activeIncident.latitude
+            ),
+
+            Number(
+              activeIncident.longitude
+            ),
+
+            Number(
+              hospitalItem.latitude
+            ),
+
+            Number(
+              hospitalItem.longitude
+            )
           );
-        }
-      );
 
-      return result;
+        if (
+          best === null ||
+          distance <
+            best.distance
+        ) {
+
+          best = {
+            ...hospitalItem,
+            distance,
+          };
+        }
+      }
+
+      return best;
+
     }, [
-      alerts,
-      incidentDetails,
+      activeIncident,
       availableHospitals,
     ]);
 
 
-  /* ==========================================================
-     LOADING
-     ========================================================== */
+  // ==========================================================
+  // ACCEPT
+  // ==========================================================
+
+  async function accept(
+    incidentId
+  ) {
+
+    try {
+
+      await api.incidents.accept(
+        incidentId
+      );
+
+      /*
+       * Do NOT call loadDashboard first.
+       *
+       * Once accepted, /pending no longer contains
+       * the incident. Navigate immediately.
+       */
+      navigate(
+        `/hospital/incidents/${encodeURIComponent(
+          incidentId
+        )}`
+      );
+
+    } catch (e) {
+
+      setError(
+        e.message
+      );
+    }
+  }
+
+
+  // ==========================================================
+  // REJECT
+  // ==========================================================
+
+  async function reject(
+    incidentId
+  ) {
+
+    try {
+
+      await api.incidents.reject(
+        incidentId
+      );
+
+      await loadPending();
+
+    } catch (e) {
+
+      setError(
+        e.message
+      );
+    }
+  }
+
+
+  // ==========================================================
+  // LOADING
+  // ==========================================================
 
   if (loading) {
+
     return (
       <Loading
         label="Loading emergency dashboard..."
@@ -433,16 +761,21 @@ export default function HospitalDashboard() {
   }
 
 
+  // ==========================================================
+  // UI
+  // ==========================================================
+
   return (
     <section>
 
-      {/* ==================================================== */}
-      {/* HEADER                                               */}
-      {/* ==================================================== */}
+      {/* ======================================================
+          PAGE HEADER
+      ====================================================== */}
 
       <div className="page-heading">
 
         <div>
+
           <span className="eyebrow">
             LIVE ACCIDENT QUEUE
           </span>
@@ -452,11 +785,12 @@ export default function HospitalDashboard() {
           </h2>
 
           <p>
-            Every pending alert is broadcast
-            to available hospitals. The first
-            hospital to accept claims the case.
+            Accident alerts are sent directly
+            from the live detection service.
           </p>
+
         </div>
+
 
         <span
           className={`availability-chip ${
@@ -478,13 +812,14 @@ export default function HospitalDashboard() {
       />
 
 
-      {/* ==================================================== */}
-      {/* STATS                                                */}
-      {/* ==================================================== */}
+      {/* ======================================================
+          STATS
+      ====================================================== */}
 
       <div className="stats-grid">
 
         <div className="stat-card danger">
+
           <span className="stat-label">
             Live alerts
           </span>
@@ -496,61 +831,438 @@ export default function HospitalDashboard() {
           <span className="stat-detail">
             Pending hospital response
           </span>
+
         </div>
 
 
         <div className="stat-card">
+
+          <span className="stat-label">
+            Active responses
+          </span>
+
+          <strong className="stat-value">
+            {activeCases.length}
+          </strong>
+
+          <span className="stat-detail">
+            Accepted cases in progress
+          </span>
+
+        </div>
+
+
+        <div className="stat-card">
+
           <span className="stat-label">
             Attended this month
           </span>
 
           <strong className="stat-value">
-            {stats?.attended_this_month ?? 0}
+            {stats?.attended_this_month ??
+              0}
           </strong>
 
           <span className="stat-detail">
             Your hospital
           </span>
+
         </div>
 
 
         <div className="stat-card">
-          <span className="stat-label">
-            Total attended
-          </span>
 
-          <strong className="stat-value">
-            {stats?.total_attended ?? 0}
-          </strong>
-
-          <span className="stat-detail">
-            All time
-          </span>
-        </div>
-
-
-        <div className="stat-card">
           <span className="stat-label">
             Ambulances
           </span>
 
           <strong className="stat-value">
-            {getAmbulances(
-              hospital
-            )}
+            {
+              (hospital?.resources
+                ?.small_ambulances ??
+                0) +
+              (hospital?.resources
+                ?.large_ambulances ??
+                0)
+            }
           </strong>
 
           <span className="stat-detail">
             Small + large
           </span>
+
         </div>
 
       </div>
 
 
-      {/* ==================================================== */}
-      {/* ALERT LIST                                           */}
-      {/* ==================================================== */}
+      {/* ======================================================
+          ACTIVE RESPONSE CASES
+      ====================================================== */}
+
+      <div className="panel">
+
+        <div className="panel-heading">
+
+          <div>
+
+            <span className="eyebrow">
+              ACTIVE RESPONSE CASES
+            </span>
+
+            <h3>
+              Accepted requests
+            </h3>
+
+            <p>
+              Track every case your hospital has accepted
+              until the ambulance arrives and the incident
+              is resolved.
+            </p>
+
+          </div>
+
+        </div>
+
+
+        {activeCases.length === 0 ? (
+
+          <div className="empty-state">
+
+            <strong>
+              No active response cases
+            </strong>
+
+            <span>
+              Accepted emergency requests will appear here.
+            </span>
+
+          </div>
+
+        ) : (
+
+          <div
+            style={{
+              display:
+                "flex",
+              flexDirection:
+                "column",
+              gap:
+                "14px",
+            }}
+          >
+
+            {activeCases.map(
+              (
+                incident
+              ) => (
+
+                <div
+                  key={
+                    incident.incident_id
+                  }
+
+                  style={{
+                    border:
+                      "1px solid #e2e8f0",
+                    borderRadius:
+                      "14px",
+                    padding:
+                      "18px",
+                    background:
+                      "#ffffff",
+                  }}
+                >
+
+                  {/* ------------------------------------------
+                      CASE HEADER
+                  ------------------------------------------ */}
+
+                  <div
+                    style={{
+                      display:
+                        "flex",
+                      justifyContent:
+                        "space-between",
+                      alignItems:
+                        "center",
+                      gap:
+                        "16px",
+                      flexWrap:
+                        "wrap",
+                    }}
+                  >
+
+                    <div>
+
+                      <span
+                        className="alert-label"
+                      >
+                        ACCEPTED CASE
+                      </span>
+
+                      <h3
+                        style={{
+                          margin:
+                            "5px 0 4px",
+                        }}
+                      >
+                        {
+                          incident.incident_id
+                        }
+                      </h3>
+
+                      <p
+                        style={{
+                          margin:
+                            0,
+                        }}
+                      >
+                        Accepted{" "}
+                        {incident.accepted_at
+                          ? formatDate(
+                              incident.accepted_at
+                            )
+                          : "recently"}
+                      </p>
+
+                    </div>
+
+
+                    <div
+                      style={{
+                        textAlign:
+                          "right",
+                      }}
+                    >
+
+                      <div
+                        style={{
+                          fontSize:
+                            "11px",
+                          fontWeight:
+                            700,
+                          color:
+                            "#64748b",
+                          textTransform:
+                            "uppercase",
+                          letterSpacing:
+                            "0.06em",
+                        }}
+                      >
+                        Current status
+                      </div>
+
+                      <div
+                        style={{
+                          marginTop:
+                            "5px",
+                          fontWeight:
+                            800,
+                          color:
+                            "#111827",
+                        }}
+                      >
+                        {
+                          statusLabel(
+                            incident.status
+                          )
+                        }
+                      </div>
+
+                    </div>
+
+                  </div>
+
+
+                  {/* ------------------------------------------
+                      METRICS
+                  ------------------------------------------ */}
+
+                  <div
+                    className="alert-metrics"
+                    style={{
+                      marginTop:
+                        "16px",
+                    }}
+                  >
+
+                    <div>
+
+                      <span>
+                        Confidence
+                      </span>
+
+                      <strong>
+                        {formatConfidence(
+                          incident.confidence
+                        )}
+                      </strong>
+
+                    </div>
+
+
+                    <div>
+
+                      <span>
+                        Severity
+                      </span>
+
+                      <strong>
+                        {
+                          incident.severity
+                            ?.level ||
+                          "UNKNOWN"
+                        }
+                      </strong>
+
+                    </div>
+
+
+                    <div>
+
+                      <span>
+                        Camera
+                      </span>
+
+                      <strong>
+                        {
+                          incident.camera_id ||
+                          "—"
+                        }
+                      </strong>
+
+                    </div>
+
+
+                    <div>
+
+                      <span>
+                        Ambulance
+                      </span>
+
+                      <strong>
+                        {
+                          incident.ambulance_type ||
+                          "Not dispatched"
+                        }
+                      </strong>
+
+                    </div>
+
+                  </div>
+
+
+                  {/* ------------------------------------------
+                      TRACKING TIMELINE
+                  ------------------------------------------ */}
+
+                  <CaseTracking
+                    status={
+                      incident.status ||
+                      "RESPONSE_ACCEPTED"
+                    }
+                  />
+
+
+                  {/* ------------------------------------------
+                      ACTIONS
+                  ------------------------------------------ */}
+
+                  <div
+                    className="button-row"
+                    style={{
+                      marginTop:
+                        "20px",
+                    }}
+                  >
+
+                    <Link
+                      className="button primary"
+                      to={`/hospital/incidents/${encodeURIComponent(
+                        incident.incident_id
+                      )}`}
+                    >
+                      TRACK CASE
+                    </Link>
+
+                  </div>
+
+                </div>
+
+              )
+            )}
+
+          </div>
+
+        )}
+
+      </div>
+
+
+      {/* ======================================================
+          EMERGENCY MAP
+      ====================================================== */}
+
+      <div className="panel">
+
+        <div className="panel-heading">
+
+          <div>
+
+            <span className="eyebrow">
+              EMERGENCY LOCATION
+            </span>
+
+            <h3>
+              Accident and hospital network
+            </h3>
+
+            <p>
+
+              {recommendedHospital
+
+                ? `Nearest available hospital: ${
+                    recommendedHospital.name
+                  } (${recommendedHospital.distance.toFixed(
+                    2
+                  )} km)`
+
+                : "Hospital locations are shown when coordinates are available."}
+
+            </p>
+
+          </div>
+
+        </div>
+
+
+        <MapView
+          incidents={
+            alerts
+          }
+
+          hospitals={
+            availableHospitals
+          }
+
+          activeIncident={
+            activeIncident
+          }
+
+          recommendedHospital={
+            recommendedHospital
+          }
+
+          height={420}
+        />
+
+      </div>
+
+
+      {/* ======================================================
+          PENDING ALERT QUEUE
+      ====================================================== */}
 
       <div className="alert-list">
 
@@ -563,65 +1275,18 @@ export default function HospitalDashboard() {
             </strong>
 
             <span>
-              New alerts will appear
-              automatically.
+              New alerts will appear automatically.
             </span>
 
           </div>
 
         ) : (
 
-          alerts.map((incident) => {
+          alerts.map(
+            (
+              incident
+            ) => (
 
-            const detail =
-              incidentDetails[
-                incident.incident_id
-              ] || incident;
-
-            const ranked =
-              recommendations[
-                incident.incident_id
-              ] || [];
-
-            const recommended =
-              ranked.find(
-                (item) =>
-                  item.emergency_available
-              ) || null;
-
-
-            /*
-             * ------------------------------------------------
-             * ACCIDENT LOCATION
-             * ------------------------------------------------
-             */
-
-            const incidentForMap = {
-              ...detail,
-
-              latitude:
-                detail.latitude ??
-                incident.latitude,
-
-              longitude:
-                detail.longitude ??
-                incident.longitude,
-
-              camera_id:
-                detail.camera_id ??
-                incident.camera_id,
-
-              severity:
-                detail.severity ??
-                incident.severity,
-
-              confidence:
-                detail.confidence ??
-                incident.confidence,
-            };
-
-
-            return (
               <div
                 className="alert-card"
                 key={
@@ -629,63 +1294,67 @@ export default function HospitalDashboard() {
                 }
               >
 
-                {/* ========================================== */}
-                {/* HEADER                                    */}
-                {/* ========================================== */}
-
                 <div>
+
                   <span className="alert-label">
                     NEW ACCIDENT
                   </span>
 
                   <h3>
-                    {incident.incident_id}
+                    {
+                      incident.incident_id
+                    }
                   </h3>
 
                   <p>
-                    {formatDate(
-                      incident.timestamp
-                    )}
+                    {
+                      formatDate(
+                        incident.timestamp
+                      )
+                    }
                   </p>
+
                 </div>
 
-
-                {/* ========================================== */}
-                {/* METRICS                                   */}
-                {/* ========================================== */}
 
                 <div className="alert-metrics">
 
                   <div>
+
                     <span>
                       Confidence
                     </span>
 
                     <strong>
-                      {formatConfidence(
-                        incident.confidence
-                      )}
+                      {
+                        formatConfidence(
+                          incident.confidence
+                        )
+                      }
                     </strong>
+
                   </div>
 
 
                   <div>
+
                     <span>
                       Severity
                     </span>
 
                     <strong>
                       {
-                        incident
-                          .severity
+                        incident.severity
                           ?.level ||
                         "UNKNOWN"
                       }
                     </strong>
+
                   </div>
 
 
                   <div>
+
                     <span>
                       Camera
                     </span>
@@ -695,329 +1364,19 @@ export default function HospitalDashboard() {
                         incident.camera_id
                       }
                     </strong>
+
                   </div>
 
                 </div>
 
 
-                {/* ========================================== */}
-                {/* LIVE MAP                                  */}
-                {/* ========================================== */}
-
-                {incidentForMap.latitude != null &&
-                  incidentForMap.longitude != null && (
-
-                  <div
-                    style={{
-                      width: "100%",
-                      marginTop: 16,
-                    }}
-                  >
-
-                    <MapView
-                      incidents={[]}
-
-                      hospitals={
-                        ranked
-                      }
-
-                      activeIncident={
-                        incidentForMap
-                      }
-
-                      recommendedHospital={
-                        recommended
-                      }
-
-                      height={320}
-                    />
-
-                  </div>
-
-                )}
-
-
-                {/* ========================================== */}
-                {/* NO LOCATION WARNING                       */}
-                {/* ========================================== */}
-
-                {(
-                  incidentForMap.latitude == null ||
-                  incidentForMap.longitude == null
-                ) && (
-
-                  <div
-                    className="panel"
-                    style={{
-                      marginTop: 16,
-                    }}
-                  >
-
-                    <strong>
-                      📍 Location unavailable
-                    </strong>
-
-                    <p className="muted">
-                      This camera/incident does
-                      not currently have GPS
-                      coordinates.
-                    </p>
-
-                  </div>
-
-                )}
-
-
-                {/* ========================================== */}
-                {/* RECOMMENDATION                            */}
-                {/* ========================================== */}
-
-                {recommended && (
-
-                  <div
-                    className="panel"
-                    style={{
-                      marginTop: 16,
-                    }}
-                  >
-
-                    <span className="eyebrow">
-                      TRIAGE SUPPORT
-                    </span>
-
-                    <h3>
-                      ⭐ Recommended Hospital
-                    </h3>
-
-
-                    <div className="stats-grid">
-
-                      <div className="stat-card">
-                        <span className="stat-label">
-                          Hospital
-                        </span>
-
-                        <strong className="stat-value">
-                          {
-                            recommended.hospital_name
-                          }
-                        </strong>
-                      </div>
-
-
-                      <div className="stat-card">
-                        <span className="stat-label">
-                          Distance
-                        </span>
-
-                        <strong className="stat-value">
-                          {recommended.distance_km.toFixed(
-                            2
-                          )}{" "}
-                          km
-                        </strong>
-                      </div>
-
-
-                      <div className="stat-card">
-                        <span className="stat-label">
-                          Ambulances
-                        </span>
-
-                        <strong className="stat-value">
-                          {
-                            recommended.available_ambulances
-                          }
-                        </strong>
-                      </div>
-
-
-                      <div className="stat-card">
-                        <span className="stat-label">
-                          Beds
-                        </span>
-
-                        <strong className="stat-value">
-                          {
-                            recommended.available_beds
-                          }
-                        </strong>
-                      </div>
-
-                    </div>
-
-
-                    <p
-                      className="muted"
-                      style={{
-                        marginTop: 12,
-                      }}
-                    >
-                      Recommendation considers
-                      distance, ambulance
-                      availability, bed capacity
-                      and emergency availability.
-                      It is decision-support only.
-                    </p>
-
-                  </div>
-
-                )}
-
-
-                {/* ========================================== */}
-                {/* NEARBY HOSPITALS                           */}
-                {/* ========================================== */}
-
-                {ranked.length > 0 && (
-
-                  <div
-                    className="panel"
-                    style={{
-                      marginTop: 16,
-                    }}
-                  >
-
-                    <div className="panel-header">
-
-                      <div>
-                        <span className="eyebrow">
-                          NEARBY HOSPITALS
-                        </span>
-
-                        <h3>
-                          Response options
-                        </h3>
-                      </div>
-
-                    </div>
-
-
-                    <div className="table-wrap">
-
-                      <table>
-
-                        <thead>
-                          <tr>
-                            <th>
-                              Hospital
-                            </th>
-
-                            <th>
-                              Distance
-                            </th>
-
-                            <th>
-                              Ambulances
-                            </th>
-
-                            <th>
-                              Beds
-                            </th>
-
-                            <th>
-                              Status
-                            </th>
-
-                            <th>
-                              Recommendation
-                            </th>
-                          </tr>
-                        </thead>
-
-
-                        <tbody>
-
-                          {ranked
-                            .slice(0, 5)
-                            .map(
-                              (item) => {
-
-                                const best =
-                                  recommended &&
-                                  recommended.hospital_id ===
-                                    item.hospital_id;
-
-                                return (
-                                  <tr
-                                    key={
-                                      item.hospital_id
-                                    }
-                                  >
-
-                                    <td>
-                                      <strong>
-                                        {
-                                          item.hospital_name
-                                        }
-                                      </strong>
-                                    </td>
-
-                                    <td>
-                                      {
-                                        item.distance_km.toFixed(
-                                          2
-                                        )
-                                      }{" "}
-                                      km
-                                    </td>
-
-                                    <td>
-                                      {
-                                        item.available_ambulances
-                                      }
-                                    </td>
-
-                                    <td>
-                                      {
-                                        item.available_beds
-                                      }
-                                    </td>
-
-                                    <td>
-                                      {
-                                        item.emergency_available
-                                          ? "AVAILABLE"
-                                          : "UNAVAILABLE"
-                                      }
-                                    </td>
-
-                                    <td>
-                                      {best
-                                        ? "⭐ BEST MATCH"
-                                        : "—"}
-                                    </td>
-
-                                  </tr>
-                                );
-                              }
-                            )}
-
-                        </tbody>
-
-                      </table>
-
-                    </div>
-
-                  </div>
-
-                )}
-
-
-                {/* ========================================== */}
-                {/* ACTIONS                                   */}
-                {/* ========================================== */}
-
-                <div
-                  className="button-row"
-                  style={{
-                    marginTop: 16,
-                  }}
-                >
+                <div className="button-row">
 
                   <Link
                     className="button secondary"
-                    to={`/hospital/incidents/${incident.incident_id}`}
+                    to={`/hospital/incidents/${encodeURIComponent(
+                      incident.incident_id
+                    )}`}
                   >
                     Review
                   </Link>
@@ -1049,8 +1408,9 @@ export default function HospitalDashboard() {
                 </div>
 
               </div>
-            );
-          })
+
+            )
+          )
 
         )}
 
