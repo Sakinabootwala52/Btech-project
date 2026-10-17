@@ -1,0 +1,62 @@
+{
+  "status": "completed",
+  "camera_id": "CAM_001",
+  "source": "D:\\Btech-project\\sample_videos\\clip_01.mp4",
+  "frames_processed": 210,
+  "last_timestamp": 7.007000000000001,
+  "accident_detected": true,
+  "last_detection": {
+    "accident_detected": false,
+    "confidence": 0.348,
+    "speed_anomaly": false,
+    "trajectory_anomaly": true,
+    "collision_proximity": false,
+    "persistent_abnormal_motion": false,
+    "speed_before": 17.56,
+    "speed_after": 25.97,
+    "evidence": {
+      "strong_speed_anomaly": false,
+      "direction_change": 78.48,
+      "vehicle_interaction": false,
+      "persistent_motion": false,
+      "sudden_stop": false,
+      "strongest_track_score": 0.3
+    },
+    "severity": {
+      "level": "LOW",
+      "score": 0.2035,
+      "basis": [
+        "relative_motion_change"
+      ],
+      "relative_speed_before": 17.56,
+      "speed_unit": "image_space_relative"
+    }
+  },
+  "events": [
+    {
+      "accident_detected": true,
+      "confidence": 0.75,
+      "camera_id": "CAM_001",
+      "timestamp_seconds": 6.072733333333334,
+      "frame_index": 182,
+      "speed_before": 1554.03,
+      "speed_after": 40.53,
+      "speed_anomaly": true,
+      "trajectory_anomaly": true,
+      "collision_proximity": false,
+      "persistent_abnormal_motion": true,
+      "severity": {
+        "level": "HIGH",
+        "score": 0.75,
+        "basis": [
+          "relative_motion_change",
+          "post_event_slowdown"
+        ],
+        "relative_speed_before": 1554.03,
+        "speed_unit": "image_space_relative"
+      },
+      "video_clip": "D:\\Btech-project\\ml\\outputs\\clips\\CAM_001_stream_6072.mp4"
+    }
+  ],
+  "elapsed_seconds": 22.562918424606323
+}

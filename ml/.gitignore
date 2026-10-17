@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.pt
+outputs/*
+!outputs/.gitkeep
+runs/
+.vscode/
+.idea/

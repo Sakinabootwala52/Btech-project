@@ -1,0 +1,15 @@
+{
+  "video_path": "..\\sample_videos\\clip_01.mp4",
+  "camera_id": "CAM_001",
+  "accident_detected": false,
+  "events": [],
+  "metrics": {
+    "fps_source": 29.97002997002997,
+    "frames_processed": 210,
+    "video_total_frames": 210,
+    "processing_seconds": 16.965,
+    "processing_fps": 12.38,
+    "detection_latency_seconds": 0.08079
+  },
+  "annotated_video": null
+}

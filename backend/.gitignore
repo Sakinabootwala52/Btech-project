@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+uploads/videos/*
+!uploads/videos/.gitkeep
+*.log
+.vscode/
+.idea/
+
+.vscode/
+node_modules/

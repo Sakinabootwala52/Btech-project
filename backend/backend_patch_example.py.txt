@@ -1,0 +1,51 @@
+# COPY THE RELEVANT PARTS into your existing backend.
+# Do not replace the entire backend blindly.
+
+SEVERITY_DEFAULT = {
+    "level": "UNKNOWN",
+    "score": None,
+    "basis": [],
+    "relative_speed_before": None,
+    "speed_unit": "unknown",
+}
+
+def normalize_severity(value):
+    if not isinstance(value, dict):
+        return dict(SEVERITY_DEFAULT)
+
+    level = str(value.get("level", "UNKNOWN")).upper()
+    if level not in {"LOW", "MEDIUM", "HIGH", "UNKNOWN"}:
+        level = "UNKNOWN"
+
+    score = value.get("score")
+    if score is not None:
+        try:
+            score = float(score)
+        except (TypeError, ValueError):
+            score = None
+
+    basis = value.get("basis", [])
+    if not isinstance(basis, list):
+        basis = []
+
+    return {
+        "level": level,
+        "score": score,
+        "basis": [str(x) for x in basis],
+        "relative_speed_before": value.get("relative_speed_before"),
+        "speed_unit": str(value.get("speed_unit", "unknown")),
+    }
+
+# In POST /api/detect-accident:
+#
+# severity = normalize_severity(payload.get("severity"))
+#
+# Then store:
+#
+# incident["severity"] = severity
+#
+# and return it in the incident response.
+
+# IMPORTANT:
+# Keep the existing camera lookup, hospital matching, duplicate protection,
+# status handling, and incident workflow unchanged.
