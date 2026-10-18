@@ -306,6 +306,22 @@ export const api = {
     }),
   },
 
+  ambulanceSim: {
+    assignments: () => request("/ambulance-sim/assignments"),
+    start: (id, data = {}) => request(`/ambulance-sim/${encodeURIComponent(id)}/start`, {
+      method: "POST", body: JSON.stringify(data),
+    }),
+    position: (id, data) => request(`/ambulance-sim/${encodeURIComponent(id)}/position`, {
+      method: "POST", body: JSON.stringify(data),
+    }),
+    arriveScene: (id) => request(`/ambulance-sim/${encodeURIComponent(id)}/arrive-scene`, { method: "POST" }),
+    departScene: (id, data = {}) => request(`/ambulance-sim/${encodeURIComponent(id)}/depart-scene`, {
+      method: "POST", body: JSON.stringify(data),
+    }),
+    complete: (id) => request(`/ambulance-sim/${encodeURIComponent(id)}/complete`, { method: "POST" }),
+    track: (incidentId) => request(`/ambulance-sim/track/${encodeURIComponent(incidentId)}`),
+  },
+
   engineering: {
     routingBenchmark: (source = "sample") => request(`/engineering/routing-benchmark?source=${encodeURIComponent(source)}`),
   },

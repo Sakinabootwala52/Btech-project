@@ -11,11 +11,14 @@ import DispatchPlanner from "./pages/DispatchPlanner";
 import Ambulances from "./pages/Ambulances";
 import Hospitals from "./pages/Hospitals";
 import CommandCentre from "./pages/CommandCentre";
+import AmbulanceSimulation from "./pages/AmbulanceSimulation";
+import { homeFor } from "./utils";
 
 function Guard({ role, children }) {
   const auth = JSON.parse(localStorage.getItem("auth") || "null");
   if (!auth?.authenticated) return <Navigate to="/login" replace />;
-  if (role && auth.role !== role) return <Navigate to={auth.role === "admin" ? "/admin" : auth.role === "live" ? "/live" : "/hospital-dashboard"} replace />;
+  const allowed = Array.isArray(role) ? role : role ? [role] : null;
+  if (allowed && !allowed.includes(auth.role)) return <Navigate to={homeFor(auth.role)} replace />;
   return children;
 }
 
@@ -30,6 +33,7 @@ export default function App() {
       <Route path="/ambulances" element={<Guard><Ambulances /></Guard>} />
       <Route path="/hospital-dashboard" element={<Guard role="hospital"><HospitalDashboard /></Guard>} />
       <Route path="/live" element={<Guard role="live"><LiveDashboard /></Guard>} />
+      <Route path="/ambulance" element={<Guard role={["ambulance", "admin"]}><AmbulanceSimulation /></Guard>} />
       <Route path="/hospital/resources" element={<Guard role="hospital"><HospitalResources /></Guard>} />
       <Route path="/hospital/history" element={<Guard role="hospital"><HospitalHistory /></Guard>} />
       <Route path="/hospital/incidents/:id" element={<Guard role="hospital"><HospitalIncidentDetails /></Guard>} />

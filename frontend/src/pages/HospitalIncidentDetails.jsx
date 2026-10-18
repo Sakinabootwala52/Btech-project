@@ -9,6 +9,7 @@ import Loading from "../components/Loading";
 import ErrorMessage from "../components/ErrorMessage";
 import MapView from "../components/MapView";
 import AmbulanceRouteMap from "../components/AmbulanceRouteMap";
+import LiveAmbulanceTracker from "../components/LiveAmbulanceTracker";
 
 
 // ============================================================
@@ -1921,6 +1922,13 @@ export default function HospitalIncidentDetails() {
           className="panel"
         >
 
+          {/* Ambulance simulator / GPS reports a real position:
+              show it live instead of the local route animation. */}
+          {incident?.ambulance_tracking ? (
+            <LiveAmbulanceTracker
+              incidentId={incident.incident_id}
+            />
+          ) : (
           <AmbulanceRouteMap
   hospital={hospital}
   incident={incident}
@@ -1933,6 +1941,7 @@ export default function HospitalIncidentDetails() {
     }
   }}
 />
+          )}
 
         </div>
 

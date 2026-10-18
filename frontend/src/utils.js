@@ -20,3 +20,12 @@ export function formatDistance(value) {
 export function statusClass(status = "") {
   return status.toLowerCase().replaceAll("_", "-");
 }
+
+
+// Landing page for each login role.
+export function homeFor(role) {
+  if (role === "admin") return "/admin";
+  if (role === "live") return "/live";
+  if (role === "ambulance") return "/ambulance";
+  return "/hospital-dashboard";
+}

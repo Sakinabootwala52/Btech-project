@@ -27,6 +27,14 @@ def login():
         session["username"] = username
         return jsonify({"role": "live", "username": username}), 200
 
+    if role == "ambulance":
+        if username != Config.AMBULANCE_USERNAME or password != Config.AMBULANCE_PASSWORD:
+            return jsonify({"error": "INVALID_CREDENTIALS", "message": "Invalid ambulance operator credentials."}), 401
+        session.clear()
+        session["role"] = "ambulance"
+        session["username"] = username
+        return jsonify({"role": "ambulance", "username": username}), 200
+
     if role == "hospital":
         hospital = hospitals_collection().find_one({"name": {"$regex": f"^{username}$", "$options": "i"}})
         if hospital is None or password != "1234":
@@ -41,7 +49,7 @@ def login():
             "hospital_name": hospital["name"]
         }), 200
 
-    return jsonify({"error": "INVALID_ROLE", "message": "role must be admin, hospital, or live."}), 400
+    return jsonify({"error": "INVALID_ROLE", "message": "role must be admin, hospital, live, or ambulance."}), 400
 
 @auth_bp.post("/logout")
 def logout():

@@ -16,6 +16,7 @@ from routes.dispatch import dispatch_bp
 from routes.ambulances import ambulances_bp
 from routes.engineering import engineering_bp
 from routes.copilot import copilot_bp
+from routes.ambulance_sim import ambulance_sim_bp
 
 from utils.errors import register_error_handlers
 
@@ -105,6 +106,7 @@ def create_app():
     app.register_blueprint(ambulances_bp, url_prefix="/api/ambulances")
     app.register_blueprint(engineering_bp, url_prefix="/api/engineering")
     app.register_blueprint(copilot_bp, url_prefix="/api/copilot")
+    app.register_blueprint(ambulance_sim_bp, url_prefix="/api/ambulance-sim")
 
     # ---------------------------------------------------------
     # Health Check
