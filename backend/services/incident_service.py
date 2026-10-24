@@ -79,7 +79,6 @@ def create_incident_from_detection(payload):
                     "longitude": camera.get("longitude"),
                 },
                 available,
-                max_candidates=3,
             )
 
             recommended = selection["hospital"]

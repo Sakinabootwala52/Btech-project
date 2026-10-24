@@ -144,7 +144,7 @@ def haversine_distance_km(lat1, lon1, lat2, lon2):
 def select_nearest_hospital_by_road_time(
     accident_location,
     hospitals,
-    max_candidates=3,
+    max_candidates=None,
 ):
     """
     Shortlist the nearest eligible hospitals using GPS coordinates,
@@ -194,11 +194,14 @@ def select_nearest_hospital_by_road_time(
         raise HospitalRoutingError(
             "No eligible hospital with valid coordinates was found."
         )
-
-    # 2. Shortlist up to three closest hospitals by GPS distance.
+    # 2. Compare every eligible hospital by default.
+    # Straight-line distance is useful for reporting, but must not
+    # exclude a hospital that may have a faster road route.
     candidates.sort(key=lambda item: item["straight_distance_km"])
+    # Retain the optional limit only for callers that explicitly need it.
+    if max_candidates is not None:
+        candidates = candidates[:max(1, int(max_candidates))]
 
-    candidates = candidates[:max(1, int(max_candidates))]
 
     # 3. Ask OSRM to compare road distance and travel time.
     coordinates = [f"{accident_lon},{accident_lat}"]

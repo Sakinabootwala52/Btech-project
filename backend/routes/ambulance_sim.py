@@ -1,17 +1,3 @@
-"""Ambulance unit simulation and live position tracking.
-
-The ambulance operator page (frontend /ambulance) acts as the ambulance crew,
-the same way the live operator page acts as a CCTV camera:
-
-    DISPATCHED --start--> EN_ROUTE (TO_SCENE) --arrive-scene--> ARRIVED (AT_SCENE)
-        --depart-scene--> ARRIVED (TO_HOSPITAL) --complete--> RESOLVED (COMPLETED)
-
-While the vehicle moves, the page posts its position to
-POST /api/ambulance-sim/<ambulance_id>/position. A real GPS device can post to
-the same endpoint with source="GPS"; nothing else in the system needs to change.
-Hospital and admin screens read the latest position from
-GET /api/ambulance-sim/track/<incident_id>.
-"""
 from datetime import datetime, timezone
 from functools import wraps
 
@@ -49,13 +35,60 @@ def require_operator(fn):
 
 
 def _point(doc):
-    """Return {latitude, longitude} from a document, or None if missing/invalid."""
-    if not doc:
+    """Read valid coordinates from flat, nested, or GeoJSON-style records."""
+    if not isinstance(doc, dict):
+        return None
+
+    candidates = [doc, doc.get("location"), doc.get("gps"), doc.get("position"), doc.get("current_position")]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        try:
+            if candidate.get("type") == "Point" and isinstance(candidate.get("coordinates"), (list, tuple)):
+                longitude, latitude = candidate["coordinates"][:2]
+            elif isinstance(candidate.get("coordinates"), (list, tuple)) and len(candidate["coordinates"]) >= 2:
+                longitude, latitude = candidate["coordinates"][:2]
+            else:
+                latitude = candidate.get("latitude", candidate.get("lat"))
+                longitude = candidate.get("longitude", candidate.get("lng", candidate.get("lon")))
+            latitude, longitude = float(latitude), float(longitude)
+        except (TypeError, ValueError, IndexError):
+            continue
+        if -90 <= latitude <= 90 and -180 <= longitude <= 180 and not (latitude == 0 and longitude == 0):
+            return {"latitude": latitude, "longitude": longitude}
+    return None
+
+
+def _route_coordinates(value):
+    """Validate route points in Leaflet order: [latitude, longitude]."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or not 2 <= len(value) <= 5000:
+        raise ValueError("route_coordinates must contain between 2 and 5000 points.")
+    points = []
+    for point in value:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            raise ValueError("Each route point must be [latitude, longitude].")
+        try:
+            latitude, longitude = float(point[0]), float(point[1])
+        except (TypeError, ValueError):
+            raise ValueError("Route coordinates must be numeric.")
+        if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+            raise ValueError("Route coordinates are out of range.")
+        points.append([round(latitude, 6), round(longitude, 6)])
+    return points
+
+
+def _optional_nonnegative(value, field_name):
+    if value is None or value == "":
         return None
     try:
-        return {"latitude": float(doc["latitude"]), "longitude": float(doc["longitude"])}
-    except (KeyError, TypeError, ValueError):
-        return None
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} must be a number.")
+    if number < 0:
+        raise ValueError(f"{field_name} cannot be negative.")
+    return round(number, 4)
 
 
 def _severity_label(incident):
@@ -172,6 +205,12 @@ def start_trip(ambulance_id):
         return _state_conflict("The trip can only start after the hospital dispatches this ambulance.", incident, ambulance)
 
     data = request.get_json(silent=True) or {}
+    try:
+        route_coordinates = _route_coordinates(data.get("route_coordinates"))
+        route_distance_km = _optional_nonnegative(data.get("route_distance_km"), "route_distance_km")
+        route_duration_minutes = _optional_nonnegative(data.get("route_duration_minutes"), "route_duration_minutes")
+    except ValueError as exc:
+        return jsonify({"error": "INVALID_ROUTE", "message": str(exc)}), 400
     now = _now()
     tracking = incident.get("ambulance_tracking") or {}
     tracking_update = {
@@ -179,9 +218,12 @@ def start_trip(ambulance_id):
         "ambulance_tracking.source": str(data.get("source", "SIMULATION")).upper(),
         "ambulance_tracking.phase": "TO_SCENE",
         "ambulance_tracking.route_source": data.get("route_source"),
-        "ambulance_tracking.route_distance_km": data.get("route_distance_km"),
+        "ambulance_tracking.route_distance_km": route_distance_km,
+        "ambulance_tracking.route_duration_minutes": route_duration_minutes,
         "ambulance_tracking.updated_at": now,
     }
+    if route_coordinates is not None:
+        tracking_update["ambulance_tracking.route_coordinates"] = route_coordinates
     if not tracking.get("started_at"):
         tracking_update["ambulance_tracking.started_at"] = now
 
@@ -331,9 +373,18 @@ def depart_scene(ambulance_id):
     if error:
         return error
     data = request.get_json(silent=True) or {}
+    try:
+        route_coordinates = _route_coordinates(data.get("route_coordinates"))
+        route_distance_km = _optional_nonnegative(data.get("route_distance_km"), "route_distance_km")
+        route_duration_minutes = _optional_nonnegative(data.get("route_duration_minutes"), "route_duration_minutes")
+    except ValueError as exc:
+        return jsonify({"error": "INVALID_ROUTE", "message": str(exc)}), 400
     now = _now()
     # The incident stays ARRIVED (the existing lifecycle has no transport
     # status); the transport leg is tracked by the ambulance and phase.
+    route_fields = {}
+    if route_coordinates is not None:
+        route_fields["ambulance_tracking.return_route_coordinates"] = route_coordinates
     updated_incident = incidents_collection().find_one_and_update(
         # $nin also matches a missing phase, so this works even when the hospital
         # marked the arrival manually instead of the simulator.
@@ -342,9 +393,11 @@ def depart_scene(ambulance_id):
             "ambulance_tracking.phase": "TO_HOSPITAL",
             "ambulance_tracking.departed_scene_at": now,
             "ambulance_tracking.return_route_source": data.get("route_source"),
-            "ambulance_tracking.return_route_distance_km": data.get("route_distance_km"),
+            "ambulance_tracking.return_route_distance_km": route_distance_km,
+            "ambulance_tracking.return_route_duration_minutes": route_duration_minutes,
             "ambulance_tracking.updated_at": now,
             "patient_transport_started_at": now,
+            **route_fields,
         }},
         return_document=ReturnDocument.AFTER,
     )

@@ -40,6 +40,17 @@ function Metric({ label, value, detail }) {
   );
 }
 
+/*
+ * Normalize coordinate formats from the backend.
+ *
+ * Supported:
+ * { latitude: 18.52, longitude: 73.85 }
+ * { lat: 18.52, lng: 73.85 }
+ * { location: { latitude: 18.52, longitude: 73.85 } }
+ * { position: { lat: 18.52, lng: 73.85 } }
+ * GeoJSON Point: { type: "Point", coordinates: [lng, lat] }
+ * Array: [lat, lng]
+ */
 function getPoint(item) {
   if (!item) return null;
 
@@ -48,6 +59,7 @@ function getPoint(item) {
     item.position,
     item.location,
     item.gps,
+    item.coordinates,
     item.current_position,
     item.last_position,
     item.tracking?.position,
@@ -57,6 +69,30 @@ function getPoint(item) {
   for (const candidate of candidates) {
     if (!candidate) continue;
 
+    // GeoJSON uses [longitude, latitude], unlike Leaflet.
+    if (
+      candidate.type === "Point" &&
+      Array.isArray(candidate.coordinates) &&
+      candidate.coordinates.length >= 2
+    ) {
+      const longitude = Number(candidate.coordinates[0]);
+      const latitude = Number(candidate.coordinates[1]);
+
+      if (isValidPoint(latitude, longitude)) {
+        return [latitude, longitude];
+      }
+    }
+
+    // Plain coordinate array is treated as [latitude, longitude].
+    if (Array.isArray(candidate) && candidate.length >= 2) {
+      const latitude = Number(candidate[0]);
+      const longitude = Number(candidate[1]);
+
+      if (isValidPoint(latitude, longitude)) {
+        return [latitude, longitude];
+      }
+    }
+
     const lat =
       candidate.latitude ??
       candidate.lat;
@@ -64,34 +100,35 @@ function getPoint(item) {
     const lng =
       candidate.longitude ??
       candidate.lng ??
-      candidate.lon;
+      candidate.lon ??
+      candidate.long;
 
-    if (
-      lat == null ||
-      lng == null ||
-      String(lat).trim() === "" ||
-      String(lng).trim() === ""
-    ) {
+    if (lat == null || lng == null) continue;
+    if (String(lat).trim() === "" || String(lng).trim() === "") {
       continue;
     }
 
     const latitude = Number(lat);
     const longitude = Number(lng);
 
-    if (
-      Number.isFinite(latitude) &&
-      Number.isFinite(longitude) &&
-      latitude >= -90 &&
-      latitude <= 90 &&
-      longitude >= -180 &&
-      longitude <= 180 &&
-      !(latitude === 0 && longitude === 0)
-    ) {
+    if (isValidPoint(latitude, longitude)) {
       return [latitude, longitude];
     }
   }
 
   return null;
+}
+
+function isValidPoint(latitude, longitude) {
+  return (
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    latitude >= -90 &&
+    latitude <= 90 &&
+    longitude >= -180 &&
+    longitude <= 180 &&
+    !(latitude === 0 && longitude === 0)
+  );
 }
 
 function getSeverity(incident) {
@@ -104,16 +141,41 @@ function getSeverity(incident) {
   return severity ?? "Unknown";
 }
 
+function getIncidentId(incident) {
+  return incident?.incident_id ?? incident?._id ?? "";
+}
+
+function getHospitalId(hospital) {
+  return hospital?.hospital_id ?? hospital?._id ?? "";
+}
+
+function getHospitalName(hospital) {
+  return (
+    hospital?.name ??
+    hospital?.hospital_name ??
+    "Unnamed facility"
+  );
+}
+
+function formatCoordinate(value) {
+  if (value == null || value === "") return "N/A";
+
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(5) : "N/A";
+}
+
 function FitBounds({ points }) {
   const map = useMap();
 
   useEffect(() => {
+    if (!points.length) return;
+
     if (points.length > 1) {
       map.fitBounds(L.latLngBounds(points), {
         padding: [32, 32],
         maxZoom: 15,
       });
-    } else if (points.length === 1) {
+    } else {
       map.setView(points[0], 13);
     }
   }, [map, points]);
@@ -176,23 +238,18 @@ export default function CommandCentre() {
       "speechSynthesis" in window
     ) {
       window.speechSynthesis.cancel();
+
       window.speechSynthesis.speak(
         new SpeechSynthesisUtterance(`${title}. ${detail}`)
       );
     }
   }, []);
 
+  /*
+   * Load each backend resource once per refresh.
+   * Log the fresh response, not React state before it updates.
+   */
   const loadResources = useCallback(async () => {
-
-    const [incidentRows, hospitalRows, ambulanceRows] =
-  await Promise.all([
-    api.incidents.list(),
-    api.hospitals.list(),
-    api.ambulances.list(),
-  ]);
-  console.log("Incidents from backend:", incidentRows);
-console.log("Hospitals from backend:", hospitalRows);
-console.log("Ambulances from backend:", ambulanceRows);
     try {
       const [incidentRows, hospitalRows, ambulanceRows] =
         await Promise.all([
@@ -201,20 +258,42 @@ console.log("Ambulances from backend:", ambulanceRows);
           api.ambulances.list(),
         ]);
 
-      setIncidents(
-        Array.isArray(incidentRows) ? incidentRows : []
-      );
-      setHospitals(
-        Array.isArray(hospitalRows) ? hospitalRows : []
-      );
-      setAmbulances(
-        Array.isArray(ambulanceRows) ? ambulanceRows : []
+      const nextIncidents = Array.isArray(incidentRows)
+        ? incidentRows
+        : [];
+
+      const nextHospitals = Array.isArray(hospitalRows)
+        ? hospitalRows
+        : [];
+
+      const nextAmbulances = Array.isArray(ambulanceRows)
+        ? ambulanceRows
+        : [];
+
+      console.log(
+        "FULL MAP DATA:",
+        JSON.stringify(
+          {
+            incidents: nextIncidents,
+            hospitals: nextHospitals,
+            ambulances: nextAmbulances,
+          },
+          null,
+          2
+        )
       );
 
+      setIncidents(nextIncidents);
+      setHospitals(nextHospitals);
+      setAmbulances(nextAmbulances);
       setError("");
     } catch (e) {
+      console.error("Failed to load Command Centre resources:", e);
+
       setError(
-        `Could not load backend records: ${e.message}. Check that the backend and database are running and that your session has permission.`
+        `Could not load backend records: ${
+          e.message || "Unknown error"
+        }. Check that the backend, database, and session are available.`
       );
     } finally {
       setLoading(false);
@@ -230,18 +309,18 @@ console.log("Ambulances from backend:", ambulanceRows);
   }, [loadResources]);
 
   useEffect(() => {
-    if (incidents.length === 0) {
+    if (!incidents.length) {
       setSelectedIncident("");
       return;
     }
 
     const selectionExists = incidents.some(
       (incident) =>
-        String(incident.incident_id) === String(selectedIncident)
+        String(getIncidentId(incident)) === String(selectedIncident)
     );
 
     if (!selectionExists) {
-      setSelectedIncident(String(incidents[0].incident_id));
+      setSelectedIncident(String(getIncidentId(incidents[0])));
     }
   }, [incidents, selectedIncident]);
 
@@ -251,55 +330,74 @@ console.log("Ambulances from backend:", ambulanceRows);
   ).length;
 
   const activeIncidents = incidents.filter((incident) =>
-    ["PENDING", "ACCEPTED", "DISPATCHED", "EN_ROUTE"].includes(
-      String(incident.status || "").toUpperCase()
-    )
+    [
+      "PENDING",
+      "ACCEPTED",
+      "DISPATCHED",
+      "EN_ROUTE",
+      "IN_PROGRESS",
+    ].includes(String(incident.status || "").toUpperCase())
   ).length;
 
   const selectedRealIncident =
     incidents.find(
       (incident) =>
-        String(incident.incident_id) === String(selectedIncident)
+        String(getIncidentId(incident)) === String(selectedIncident)
     ) || null;
 
+  /*
+   * This displays a route saved by the backend.
+   * It does not invent a route if route geometry is missing.
+   * The backend should store route_coordinates as [lat, lng] pairs.
+   */
   const realRouteCoordinates = Array.isArray(
     selectedRealIncident?.route_coordinates
   )
     ? selectedRealIncident.route_coordinates
-        .filter((point) => {
-          if (!Array.isArray(point) || point.length < 2) {
-            return false;
+        .map((point) => {
+          if (Array.isArray(point) && point.length >= 2) {
+            const latitude = Number(point[0]);
+            const longitude = Number(point[1]);
+
+            return isValidPoint(latitude, longitude)
+              ? [latitude, longitude]
+              : null;
           }
 
-          const lat = Number(point[0]);
-          const lng = Number(point[1]);
-
-          return (
-            Number.isFinite(lat) &&
-            Number.isFinite(lng) &&
-            lat >= -90 &&
-            lat <= 90 &&
-            lng >= -180 &&
-            lng <= 180 &&
-            !(lat === 0 && lng === 0)
-          );
+          // Also accept objects containing lat/lng fields.
+          return getPoint(point);
         })
-        .map((point) => [Number(point[0]), Number(point[1])])
+        .filter(Boolean)
     : [];
 
   const realRecommendedHospital =
     hospitals.find(
       (hospital) =>
-        String(hospital.hospital_id) ===
+        String(getHospitalId(hospital)) ===
         String(selectedRealIncident?.recommended_hospital_id)
     ) || null;
 
+  /*
+   * Gather valid coordinates for all database markers.
+   */
+  const incidentPoints = incidents
+    .map(getPoint)
+    .filter(Boolean);
+
+  const hospitalPoints = hospitals
+    .map(getPoint)
+    .filter(Boolean);
+
+  const ambulancePoints = ambulances
+    .map(getPoint)
+    .filter(Boolean);
+
   const mapPoints = [
-    ...incidents.map(getPoint),
-    ...hospitals.map(getPoint),
-    ...ambulances.map(getPoint),
+    ...incidentPoints,
+    ...hospitalPoints,
+    ...ambulancePoints,
     ...realRouteCoordinates,
-  ].filter(Boolean);
+  ];
 
   const mapCenter =
     getPoint(selectedRealIncident) ||
@@ -318,6 +416,7 @@ console.log("Ambulances from backend:", ambulanceRows);
         await api.engineering.routingBenchmark("sample");
 
       setBenchmark(result);
+
       setNotice(
         "Benchmark completed. This test uses a sample graph, not live traffic."
       );
@@ -330,7 +429,7 @@ console.log("Ambulances from backend:", ambulanceRows);
 
   async function askCopilot() {
     if (!selectedRealIncident) {
-      setError("Select an actual backend incident first.");
+      setError("Select a backend incident first.");
       return;
     }
 
@@ -340,7 +439,7 @@ console.log("Ambulances from backend:", ambulanceRows);
 
     try {
       const ranked = await api.dispatch.recommendations(
-        selectedRealIncident.incident_id
+        getIncidentId(selectedRealIncident)
       );
 
       const recommendations = Array.isArray(ranked?.recommendations)
@@ -357,7 +456,7 @@ console.log("Ambulances from backend:", ambulanceRows);
 
       addEvent(
         "Copilot briefing generated",
-        `Response mode: ${result.mode}. Sources retrieved: ${
+        `Response mode: ${result.mode || "unknown"}. Sources retrieved: ${
           result.citations?.length || 0
         }.`
       );
@@ -393,8 +492,8 @@ console.log("Ambulances from backend:", ambulanceRows);
       <div className="cc-banner">
         <strong>BACKEND DATA VIEW</strong>
         <span>
-          Records are fetched from your backend. Ambulance GPS movement
-          appears only when actual position updates are received.
+          Markers use coordinates returned by the backend. Ambulance
+          movement requires GPS updates or an active route simulation.
         </span>
       </div>
 
@@ -464,29 +563,26 @@ console.log("Ambulances from backend:", ambulanceRows);
                   <Popup>
                     <strong>Saved backend road route</strong>
                     <br />
-                    Incident: {selectedRealIncident?.incident_id}
+                    Incident: {getIncidentId(selectedRealIncident)}
                     <br />
-                    Hospital: {
-                      selectedRealIncident?.recommended_hospital_name ||
-                      realRecommendedHospital?.name ||
-                      "Not available"
-                    }
+                    Hospital:{" "}
+                    {selectedRealIncident?.recommended_hospital_name ||
+                      getHospitalName(realRecommendedHospital)}
                   </Popup>
                 </Polyline>
               )}
 
               {incidents.map((incident, index) => {
                 const point = getPoint(incident);
-
                 if (!point) return null;
 
+                const incidentId = getIncidentId(incident);
                 const isSelected =
-                  String(incident.incident_id) ===
-                  String(selectedIncident);
+                  String(incidentId) === String(selectedIncident);
 
                 return (
                   <CircleMarker
-                    key={incident.incident_id || incident._id || index}
+                    key={incidentId || index}
                     center={point}
                     radius={isSelected ? 10 : 7}
                     pathOptions={{
@@ -496,22 +592,19 @@ console.log("Ambulances from backend:", ambulanceRows);
                     }}
                     eventHandlers={{
                       click: () =>
-                        setSelectedIncident(
-                          String(incident.incident_id)
-                        ),
+                        setSelectedIncident(String(incidentId)),
                     }}
                   >
                     <Popup>
-                      <strong>
-                        Incident: {incident.incident_id || "Unknown"}
-                      </strong>
+                      <strong>Incident: {incidentId || "Unknown"}</strong>
                       <br />
                       Status: {incident.status || "Unknown"}
                       <br />
                       Severity: {getSeverity(incident)}
                       <br />
-                      Click the incident selector below to view its
-                      routing details.
+                      Latitude: {point[0].toFixed(5)}
+                      <br />
+                      Longitude: {point[1].toFixed(5)}
                     </Popup>
                   </CircleMarker>
                 );
@@ -519,16 +612,15 @@ console.log("Ambulances from backend:", ambulanceRows);
 
               {hospitals.map((hospital, index) => {
                 const point = getPoint(hospital);
-
                 if (!point) return null;
 
                 const recommended =
-                  String(hospital.hospital_id) ===
+                  String(getHospitalId(hospital)) ===
                   String(selectedRealIncident?.recommended_hospital_id);
 
                 return (
                   <CircleMarker
-                    key={hospital.hospital_id || hospital._id || index}
+                    key={getHospitalId(hospital) || index}
                     center={point}
                     radius={recommended ? 10 : 7}
                     pathOptions={{
@@ -538,15 +630,15 @@ console.log("Ambulances from backend:", ambulanceRows);
                     }}
                   >
                     <Popup>
-                      <strong>
-                        {hospital.name ||
-                          hospital.hospital_name ||
-                          "Hospital"}
-                      </strong>
+                      <strong>{getHospitalName(hospital)}</strong>
                       <br />
-                      Hospital ID: {hospital.hospital_id || "N/A"}
+                      Hospital ID: {getHospitalId(hospital) || "N/A"}
                       <br />
                       Status: {hospital.status || "Unknown"}
+                      <br />
+                      Latitude: {point[0].toFixed(5)}
+                      <br />
+                      Longitude: {point[1].toFixed(5)}
                       {recommended && (
                         <>
                           <br />
@@ -560,16 +652,11 @@ console.log("Ambulances from backend:", ambulanceRows);
 
               {ambulances.map((ambulance, index) => {
                 const point = getPoint(ambulance);
-
                 if (!point) return null;
 
                 return (
                   <Marker
-                    key={
-                      ambulance.ambulance_id ||
-                      ambulance._id ||
-                      index
-                    }
+                    key={ambulance.ambulance_id || ambulance._id || index}
                     position={point}
                     icon={ambulanceIcon}
                   >
@@ -580,18 +667,22 @@ console.log("Ambulances from backend:", ambulanceRows);
                       <br />
                       Status: {ambulance.status || "Unknown"}
                       <br />
-                      Position source: {
-                        ambulance.ambulance_tracking?.source ||
+                      Latitude: {point[0].toFixed(5)}
+                      <br />
+                      Longitude: {point[1].toFixed(5)}
+                      <br />
+                      Position source:{" "}
+                      {ambulance.ambulance_tracking?.source ||
                         ambulance.tracking?.source ||
                         ambulance.position?.source ||
-                        "Not specified"
-                      }
+                        "Not specified"}
                     </Popup>
                   </Marker>
                 );
               })}
             </MapContainer>
           </div>
+
           <div className="cc-panel" style={{ marginTop: 16 }}>
             <div className="cc-panel-heading">
               <div>
@@ -620,30 +711,40 @@ console.log("Ambulances from backend:", ambulanceRows);
                     </tr>
                   </thead>
                   <tbody>
-                    {hospitals.map((hospital) => (
-                      <tr key={hospital.hospital_id || hospital._id}>
-                        <td>{hospital.name || "Unnamed facility"}</td>
-                        <td>{hospital.facility_type || "N/A"}</td>
-                        <td>{hospital.status || "Unknown"}</td>
-                        <td>
-                          {hospital.resources?.beds_available ?? "N/A"}
-                        </td>
-                        <td>
-                          {Number(hospital.latitude).toFixed(4)},{" "}
-                          {Number(hospital.longitude).toFixed(4)}
-                        </td>
-                      </tr>
-                    ))}
+                    {hospitals.map((hospital, index) => {
+                      const point = getPoint(hospital);
+
+                      return (
+                        <tr
+                          key={
+                            getHospitalId(hospital) || index
+                          }
+                        >
+                          <td>{getHospitalName(hospital)}</td>
+                          <td>{hospital.facility_type || "N/A"}</td>
+                          <td>{hospital.status || "Unknown"}</td>
+                          <td>
+                            {hospital.resources?.beds_available ?? "N/A"}
+                          </td>
+                          <td>
+                            {point
+                              ? `${point[0].toFixed(5)}, ${point[1].toFixed(5)}`
+                              : "Missing coordinates"}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
             )}
           </div>
+
           {mapPoints.length === 0 && (
             <p className="cc-footnote">
               No valid coordinates were found in the loaded records.
-              The map is showing its default viewing area only; no
-              incident or ambulance marker has been fabricated.
+              Check the FULL MAP DATA console output. No markers or routes
+              are fabricated by this component.
             </p>
           )}
 
@@ -672,15 +773,19 @@ console.log("Ambulances from backend:", ambulanceRows);
               }
             >
               <option value="">Select an incident</option>
-              {incidents.map((incident, index) => (
-                <option
-                  key={incident.incident_id || incident._id || index}
-                  value={String(incident.incident_id)}
-                >
-                  {incident.incident_id || "Unknown ID"} ·{" "}
-                  {incident.status || "Unknown status"}
-                </option>
-              ))}
+              {incidents.map((incident, index) => {
+                const incidentId = getIncidentId(incident);
+
+                return (
+                  <option
+                    key={incidentId || index}
+                    value={String(incidentId)}
+                  >
+                    {incidentId || "Unknown ID"} ·{" "}
+                    {incident.status || "Unknown status"}
+                  </option>
+                );
+              })}
             </select>
 
             {!selectedRealIncident ? (
@@ -695,7 +800,7 @@ console.log("Ambulances from backend:", ambulanceRows);
               <>
                 <p>
                   <strong>Incident:</strong>{" "}
-                  {selectedRealIncident.incident_id}
+                  {getIncidentId(selectedRealIncident)}
                 </p>
                 <p>
                   <strong>Status:</strong>{" "}
@@ -708,8 +813,7 @@ console.log("Ambulances from backend:", ambulanceRows);
                 <p>
                   <strong>Recommended hospital:</strong>{" "}
                   {selectedRealIncident.recommended_hospital_name ||
-                    realRecommendedHospital?.name ||
-                    "No saved recommendation"}
+                    getHospitalName(realRecommendedHospital)}
                 </p>
 
                 <div className="cc-route-metrics">
@@ -720,7 +824,7 @@ console.log("Ambulances from backend:", ambulanceRows);
                         ? `${selectedRealIncident.hospital_distance_km} km`
                         : "N/A"
                     }
-                    detail="Saved incident data"
+                    detail="Saved routing result"
                   />
                   <Metric
                     label="Estimated travel time"
@@ -751,7 +855,8 @@ console.log("Ambulances from backend:", ambulanceRows);
                 {realRouteCoordinates.length < 2 && (
                   <p className="cc-footnote">
                     This incident has no valid saved route geometry.
-                    Check its coordinates and the backend routing result.
+                    The backend must calculate and save a road route for
+                    its actual incident and recommended hospital.
                   </p>
                 )}
               </>
@@ -869,8 +974,8 @@ console.log("Ambulances from backend:", ambulanceRows);
             </div>
 
             <p className="cc-footnote">
-              Counts come from the API responses. They do not, by
-              themselves, confirm that a physical GPS device is connected.
+              These counts come from API responses. They do not prove
+              that a physical GPS device is connected.
             </p>
           </div>
         </aside>
@@ -929,7 +1034,8 @@ console.log("Ambulances from backend:", ambulanceRows);
                     },
                     {
                       label: "A* time",
-                      value: benchmark.averages.astar_execution_ms,
+                      value:
+                        benchmark.averages.astar_execution_ms,
                       unit: "ms",
                     },
                     {
@@ -940,7 +1046,8 @@ console.log("Ambulances from backend:", ambulanceRows);
                     },
                     {
                       label: "A* nodes",
-                      value: benchmark.averages.astar_nodes_expanded,
+                      value:
+                        benchmark.averages.astar_nodes_expanded,
                       unit: "",
                     },
                   ].map((item) => (
@@ -1102,9 +1209,8 @@ console.log("Ambulances from backend:", ambulanceRows);
           )}
 
           <p className="cc-footnote">
-            Copilot uses the selected backend incident and the
-            recommendations returned by the dispatch API. It does not
-            dispatch an ambulance automatically.
+            Copilot uses the selected backend incident and dispatch
+            recommendations. It does not dispatch an ambulance automatically.
           </p>
         </div>
       </div>
