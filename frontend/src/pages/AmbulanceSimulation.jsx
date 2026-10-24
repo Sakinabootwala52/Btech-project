@@ -1,481 +1,850 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, useMap } from "react-leaflet";
-import L from "leaflet";
-import { api } from "../api";
-import ErrorMessage from "../components/ErrorMessage";
-import Loading from "../components/Loading";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  PHASE_LABELS,
-  drivenPath,
-  fetchRoute,
-  formatAgo,
-  formatDuration,
-  pointAtDistance,
-  simulatedSpeedKmh,
-  toLatLng,
-} from "../ambulanceRoute";
+  CircleMarker,
+  MapContainer,
+  Marker,
+  Polyline,
+  Popup,
+  TileLayer,
+  useMap,
+} from "react-leaflet";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
+import "./AmbulanceSimulation.css";
+import { api } from "../api";
 
-// Ambulance Unit Simulator
-// ------------------------
-// The live page pretends to be a CCTV camera; this page pretends to be the
-// ambulance. It drives a dispatched vehicle along the road route and reports
-// each position to the backend, exactly like a GPS unit would, so hospital
-// screens can track it live.
+const DEFAULT_CENTER = [18.5204, 73.8567];
+const ROUTE_STEPS = 24;
+const STEP_DELAY_MS = 700;
 
-const TICK_MS = 200;
-const REPORT_EVERY_MS = 1500;
-const SPEED_OPTIONS = [
-  { value: 1, label: "1× — real time" },
-  { value: 5, label: "5× — fast demo" },
-  { value: 10, label: "10× — presentation" },
-  { value: 20, label: "20× — quick check" },
-];
-const ACTIVE_STATUSES = ["ASSIGNED", "EN_ROUTE", "ARRIVED", "TRANSPORTING"];
+const toPoint = (location) => {
+  if (!location) return null;
 
-const ambulanceIcon = L.divIcon({ className: "cc-ambulance-icon", html: '<div class="cc-ambulance-emoji">🚑</div>', iconSize: [42, 42], iconAnchor: [21, 21] });
-const incidentIcon = L.divIcon({ className: "cc-incident-icon", html: '<div class="cc-incident-pin">⚠</div>', iconSize: [34, 34], iconAnchor: [17, 17] });
+  const latitude = Number(location.latitude);
+  const longitude = Number(location.longitude);
 
-function FitRoute({ points }) {
+  if (
+    !Number.isFinite(latitude) ||
+    !Number.isFinite(longitude) ||
+    latitude < -90 ||
+    latitude > 90 ||
+    longitude < -180 ||
+    longitude > 180
+  ) {
+    return null;
+  }
+
+  return { latitude, longitude };
+};
+
+const mapPosition = (point) =>
+  point ? [point.latitude, point.longitude] : null;
+
+const formatNumber = (value, digits = 2) =>
+  Number.isFinite(Number(value))
+    ? Number(value).toFixed(digits)
+    : "—";
+
+const titleCase = (value) =>
+  String(value || "UNKNOWN")
+    .replaceAll("_", " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+
+const hospitalIcon = L.divIcon({
+  className: "ambulance-map-icon",
+  html: '<div class="hospital-pin">H</div>',
+  iconSize: [32, 32],
+  iconAnchor: [16, 16],
+});
+
+const accidentIcon = L.divIcon({
+  className: "ambulance-map-icon",
+  html: '<div class="accident-pin">!</div>',
+  iconSize: [34, 34],
+  iconAnchor: [17, 17],
+});
+
+const ambulanceIcon = L.divIcon({
+  className: "ambulance-map-icon",
+  html: '<div class="ambulance-pin">🚑</div>',
+  iconSize: [42, 42],
+  iconAnchor: [21, 21],
+});
+
+function MapRecenter({ points }) {
   const map = useMap();
+
   useEffect(() => {
-    if (points && points.length > 1) map.fitBounds(L.latLngBounds(points), { padding: [36, 36], maxZoom: 16 });
+    const validPoints = points.filter(Boolean);
+    if (!validPoints.length) return;
+
+    if (validPoints.length === 1) {
+      map.setView(validPoints[0], 14);
+      return;
+    }
+
+    map.fitBounds(validPoints, { padding: [35, 35], maxZoom: 15 });
   }, [map, points]);
+
   return null;
 }
 
-function Metric({ label, value, detail }) {
-  return <div className="cc-metric"><span>{label}</span><strong>{value}</strong>{detail && <small>{detail}</small>}</div>;
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function stamp() {
-  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+async function getRoadRoute(start, end) {
+  if (!start || !end) {
+    throw new Error(
+      "The assigned incident and hospital must both have valid coordinates."
+    );
+  }
+
+  const url =
+    "https://router.project-osrm.org/route/v1/driving/" +
+    `${start.longitude},${start.latitude};` +
+    `${end.longitude},${end.latitude}` +
+    "?overview=full&geometries=geojson&steps=false";
+
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    throw new Error("The road-routing service could not calculate a route.");
+  }
+
+  const data = await response.json();
+  const route = data.routes?.[0];
+
+  if (
+    data.code !== "Ok" ||
+    !route ||
+    !Array.isArray(route.geometry?.coordinates) ||
+    route.geometry.coordinates.length < 2
+  ) {
+    throw new Error(
+      "No road route was found for these coordinates. Check the saved locations."
+    );
+  }
+
+  return {
+    // OSRM returns [longitude, latitude].
+    coordinates: route.geometry.coordinates.map(([longitude, latitude]) => [
+      latitude,
+      longitude,
+    ]),
+    distanceKm: route.distance / 1000,
+    durationMinutes: route.duration / 60,
+  };
 }
 
-// Which leg the selected vehicle should drive, based on backend state.
-function legFor(row) {
-  if (!row?.incident) return null;
-  const status = row.ambulance?.status;
-  const phase = row.incident.tracking?.phase;
-  if (status === "TRANSPORTING" || phase === "TO_HOSPITAL") return "TO_HOSPITAL";
-  if (status === "ARRIVED" || phase === "AT_SCENE") return "AT_SCENE";
-  if (status === "ASSIGNED" || status === "EN_ROUTE") return "TO_SCENE";
-  return null;
+function getAssignmentId(row) {
+  return row?.ambulance?.ambulance_id || "";
+}
+
+function getIncidentPoint(row) {
+  return toPoint(row?.incident?.location);
+}
+
+function getHospitalPoint(row) {
+  return toPoint(row?.hospital?.location);
 }
 
 export default function AmbulanceSimulation() {
-  const [rows, setRows] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [assignments, setAssignments] = useState([]);
   const [selectedId, setSelectedId] = useState("");
-  const [speedFactor, setSpeedFactor] = useState(10);
-  const [route, setRoute] = useState(null);
-  const [routeLoading, setRouteLoading] = useState(false);
-  const [distanceKm, setDistanceKm] = useState(0);
-  const [speedKmh, setSpeedKmh] = useState(0);
-  const [runState, setRunState] = useState("READY"); // READY | RUNNING | PAUSED | ARRIVED_DESTINATION | COMPLETED
+  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [reports, setReports] = useState({ count: 0, lastAt: null });
-  const [events, setEvents] = useState([{ id: 1, time: stamp(), title: "Simulator ready", detail: "Select a dispatched ambulance to begin." }]);
   const [error, setError] = useState("");
-  const [, setClock] = useState(0);
+  const [message, setMessage] = useState("");
+  const [routeCoordinates, setRouteCoordinates] = useState([]);
+  const [routeInfo, setRouteInfo] = useState(null);
+  const [vehiclePosition, setVehiclePosition] = useState(null);
+  const [progress, setProgress] = useState(0);
+  const [activity, setActivity] = useState([]);
 
-  const distanceRef = useRef(0);
-  const speedRef = useRef(0);
-  const lastTickRef = useRef(0);
-  const reportingRef = useRef(false);
-  const arrivalRef = useRef(""); // legKey whose arrival was already handled
-  const eventId = useRef(2);
+  const loadAssignments = useCallback(async () => {
+    setLoading(true);
+    setError("");
 
-  const selected = useMemo(() => rows.find((row) => row.ambulance.ambulance_id === selectedId) || null, [rows, selectedId]);
-  const leg = legFor(selected);
-  const incidentPoint = toLatLng(selected?.incident?.location);
-  const hospitalPoint = toLatLng(selected?.hospital?.location);
-  const legKey = selected && leg ? `${selected.ambulance.ambulance_id}|${selected.incident.incident_id}|${leg}` : "";
-  const isRunning = runState === "RUNNING";
-
-  const addEvent = useCallback((title, detail) => {
-    setEvents((prev) => [{ id: eventId.current++, time: stamp(), title, detail }, ...prev].slice(0, 14));
-  }, []);
-
-  // ---------------------------------------------------------------
-  // Load vehicles and their assignments (polled for new dispatches)
-  // ---------------------------------------------------------------
-  const loadRows = useCallback(async () => {
     try {
-      const data = await api.ambulanceSim.assignments();
-      const list = Array.isArray(data?.ambulances) ? data.ambulances : [];
-      setRows(list);
+      const response = await api.ambulanceSim.assignments();
+      const rows = Array.isArray(response?.ambulances)
+        ? response.ambulances
+        : [];
+
+      setAssignments(rows);
+
       setSelectedId((current) => {
-        if (current && list.some((row) => row.ambulance.ambulance_id === current)) return current;
-        const firstActive = list.find((row) => ACTIVE_STATUSES.includes(row.ambulance.status) && row.incident);
-        return firstActive?.ambulance.ambulance_id || "";
+        if (current && rows.some((row) => getAssignmentId(row) === current)) {
+          return current;
+        }
+
+        const assigned = rows.find(
+          (row) => row?.ambulance?.incident_id && row?.incident
+        );
+
+        return getAssignmentId(assigned || rows[0]) || "";
       });
-      setError("");
-    } catch (e) {
-      setError(`Could not load ambulances: ${e.message}`);
+    } catch (err) {
+      setError(
+        err.message ||
+          "Could not load ambulance assignments. Check your login and Flask server."
+      );
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    loadRows();
-    const id = window.setInterval(loadRows, 4000);
-    return () => window.clearInterval(id);
-  }, [loadRows]);
+    loadAssignments();
+  }, [loadAssignments]);
 
-  useEffect(() => {
-    const id = window.setInterval(() => setClock((n) => n + 1), 1000);
-    return () => window.clearInterval(id);
+  const selected = useMemo(
+    () => assignments.find((row) => getAssignmentId(row) === selectedId) || null,
+    [assignments, selectedId]
+  );
+
+  const ambulance = selected?.ambulance || null;
+  const incident = selected?.incident || null;
+  const hospital = selected?.hospital || null;
+
+  const incidentPoint = getIncidentPoint(selected);
+  const hospitalPoint = getHospitalPoint(selected);
+
+  const tracking = incident?.tracking || {};
+  const trackingPosition = toPoint(tracking?.position);
+
+  const currentPosition =
+    vehiclePosition ||
+    trackingPosition ||
+    (tracking?.phase === "TO_HOSPITAL" ||
+    tracking?.phase === "COMPLETED"
+      ? hospitalPoint
+      : tracking?.phase === "AT_SCENE"
+        ? incidentPoint
+        : hospitalPoint);
+
+  const mapPoints = useMemo(
+    () =>
+      [
+        mapPosition(incidentPoint),
+        mapPosition(hospitalPoint),
+        mapPosition(currentPosition),
+      ].filter(Boolean),
+    [
+      incidentPoint?.latitude,
+      incidentPoint?.longitude,
+      hospitalPoint?.latitude,
+      hospitalPoint?.longitude,
+      currentPosition?.latitude,
+      currentPosition?.longitude,
+    ]
+  );
+
+  const addActivity = useCallback((text) => {
+    setActivity((items) =>
+      [
+        {
+          id: `${Date.now()}-${Math.random()}`,
+          text,
+          time: new Date().toLocaleTimeString(),
+        },
+        ...items,
+      ].slice(0, 8)
+    );
   }, []);
 
-  // ---------------------------------------------------------------
-  // Load the road route for the current leg
-  // ---------------------------------------------------------------
-  const legStartLat = leg === "TO_HOSPITAL" ? incidentPoint?.[0] : hospitalPoint?.[0];
-  const legStartLng = leg === "TO_HOSPITAL" ? incidentPoint?.[1] : hospitalPoint?.[1];
-  const legEndLat = leg === "TO_HOSPITAL" ? hospitalPoint?.[0] : incidentPoint?.[0];
-  const legEndLng = leg === "TO_HOSPITAL" ? hospitalPoint?.[1] : incidentPoint?.[1];
+  const refreshAfterAction = useCallback(async () => {
+    const response = await api.ambulanceSim.assignments();
+    const rows = Array.isArray(response?.ambulances)
+      ? response.ambulances
+      : [];
 
+    setAssignments(rows);
+  }, []);
   useEffect(() => {
-    let cancelled = false;
-    setRunState((state) => (state === "COMPLETED" ? state : "READY"));
-    if (!legKey || leg === "AT_SCENE" || legStartLat == null || legEndLat == null) {
-      setRoute(null);
-      return undefined;
-    }
-    setRouteLoading(true);
-    fetchRoute([legStartLat, legStartLng], [legEndLat, legEndLng]).then((loaded) => {
-      if (cancelled) return;
-      // Resume from the last reported progress if the trip already started.
-      const tracking = selected?.incident?.tracking;
-      const saved = tracking?.phase === leg ? Number(tracking?.position?.progress) : 0;
-      const resumeKm = Number.isFinite(saved) && saved > 0 && saved < 1 ? saved * loaded.totalKm : 0;
-      distanceRef.current = resumeKm;
-      setDistanceKm(resumeKm);
-      setSpeedKmh(0);
-      setRoute(loaded);
-      if (resumeKm > 0) setRunState("PAUSED");
-      setRouteLoading(false);
-    });
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [legKey, legStartLat, legStartLng, legEndLat, legEndLng]);
-
-  // ---------------------------------------------------------------
-  // Report the current position to the backend
-  // ---------------------------------------------------------------
-  // Read through a ref so the reporting timer is not restarted by polling.
-  const contextRef = useRef({});
-  contextRef.current = { route, selected, leg };
-
-  const reportPosition = useCallback(async (override = {}) => {
-    const { route, selected, leg } = contextRef.current;
-    if (!route || !selected || reportingRef.current) return;
-    const distance = distanceRef.current;
-    const point = pointAtDistance(route, distance);
-    const remaining = Math.max(0, route.totalKm - distance);
-    const speed = speedRef.current;
-    reportingRef.current = true;
+  const timer = window.setInterval(async () => {
     try {
-      await api.ambulanceSim.position(selected.ambulance.ambulance_id, {
-        latitude: point[0],
-        longitude: point[1],
-        phase: leg,
-        source: "SIMULATION",
-        progress: route.totalKm ? distance / route.totalKm : 1,
-        speed_kmh: speed,
-        remaining_km: remaining,
-        eta_seconds: remaining > 0 ? (remaining / Math.max(speed || 30, 15)) * 3600 : 0,
-        ...override,
-      });
-      setReports((prev) => ({ count: prev.count + 1, lastAt: new Date().toISOString() }));
-    } catch (e) {
-      setRunState("PAUSED");
-      setError(`Position update rejected: ${e.message}`);
-      addEvent("Trip interrupted", "The backend rejected a position update — the incident was probably updated from another screen.");
-      loadRows();
-    } finally {
-      reportingRef.current = false;
+      const response = await api.ambulanceSim.assignments();
+
+      const rows = Array.isArray(response?.ambulances)
+        ? response.ambulances
+        : [];
+
+      setAssignments(rows);
+    } catch (err) {
+      console.error("Could not refresh ambulance assignments:", err);
     }
-  }, [addEvent, loadRows]);
+  }, 5000);
 
-  // ---------------------------------------------------------------
-  // Drive: advance the vehicle along the route
-  // ---------------------------------------------------------------
-  useEffect(() => {
-    if (!isRunning || !route) return undefined;
-    lastTickRef.current = performance.now();
-    const id = window.setInterval(() => {
-      const now = performance.now();
-      const dtSeconds = Math.min(1, (now - lastTickRef.current) / 1000);
-      lastTickRef.current = now;
-      const speed = simulatedSpeedKmh(distanceRef.current, route.totalKm);
-      const next = Math.min(route.totalKm, distanceRef.current + (speed / 3600) * dtSeconds * speedFactor);
-      distanceRef.current = next;
-      speedRef.current = speed;
-      setDistanceKm(next);
-      setSpeedKmh(speed);
-      if (next >= route.totalKm) setRunState("ARRIVED_DESTINATION");
-    }, TICK_MS);
-    return () => window.clearInterval(id);
-  }, [isRunning, route, speedFactor]);
+  return () => window.clearInterval(timer);
+}, []);
 
-  useEffect(() => {
-    if (!isRunning) return undefined;
-    reportPosition();
-    const id = window.setInterval(() => reportPosition(), REPORT_EVERY_MS);
-    return () => window.clearInterval(id);
-  }, [isRunning, reportPosition]);
+  const animateLeg = useCallback(
+    async ({ ambulanceId, route, phase, startIndex = 0 }) => {
+      const coordinates = route.coordinates;
+      const total = coordinates.length;
 
-  // ---------------------------------------------------------------
-  // Arrival at the end of a leg
-  // ---------------------------------------------------------------
-  useEffect(() => {
-    // Handle each leg's arrival exactly once. Polling can change `selected`
-    // (and even the leg) while runState is still ARRIVED_DESTINATION.
-    if (runState !== "ARRIVED_DESTINATION" || !selected) return;
-    if (leg !== "TO_SCENE" && leg !== "TO_HOSPITAL") return;
-    if (arrivalRef.current === legKey) return;
-    arrivalRef.current = legKey;
-    speedRef.current = 0;
-    setSpeedKmh(0);
-    const id = selected.ambulance.ambulance_id;
-    (async () => {
-      setBusy(true);
-      try {
-        if (leg === "TO_SCENE") {
-          await api.ambulanceSim.arriveScene(id);
-          addEvent("Arrived at accident scene", `${id} reached ${selected.incident.incident_id}. Incident marked ARRIVED for the hospital.`);
-        } else {
-          await reportPosition({ progress: 1, remaining_km: 0, eta_seconds: 0, speed_kmh: 0 });
-          addEvent("Arrived at hospital", `${id} reached ${selected.hospital?.name}. Complete the handover to free the vehicle.`);
+      setRouteCoordinates(coordinates);
+      setRouteInfo(route);
+      setProgress(0);
+
+      // Send fewer, evenly spaced points to the backend to avoid
+      // excessive requests while keeping the marker moving smoothly.
+      const indices = Array.from(
+        new Set(
+          Array.from({ length: ROUTE_STEPS + 1 }, (_, index) =>
+            Math.round((index / ROUTE_STEPS) * (total - 1))
+          )
+        )
+      ).filter((index) => index >= startIndex);
+
+      for (let step = 0; step < indices.length; step += 1) {
+        const index = indices[step];
+        const [latitude, longitude] = coordinates[index];
+        const fraction = index / Math.max(total - 1, 1);
+
+        setVehiclePosition({ latitude, longitude });
+        setProgress(Math.round(fraction * 100));
+
+        const remainingKm = route.distanceKm * (1 - fraction);
+        const etaSeconds = route.durationMinutes * 60 * (1 - fraction);
+
+        await api.ambulanceSim.position(ambulanceId, {
+          latitude,
+          longitude,
+          phase,
+          source: "SIMULATION",
+          progress: fraction,
+          speed_kmh: 25,
+          remaining_km: remainingKm,
+          eta_seconds: etaSeconds,
+        });
+
+        if (step < indices.length - 1) {
+          await delay(STEP_DELAY_MS);
         }
-        await loadRows();
-      } catch (e) {
-        setError(e.message);
-      } finally {
-        setBusy(false);
       }
-    })();
-  }, [runState, selected, leg, legKey, addEvent, loadRows, reportPosition]);
 
-  // ---------------------------------------------------------------
-  // Operator actions
-  // ---------------------------------------------------------------
-  async function startOrResume() {
-    if (!selected || !route) return;
-    setError("");
-    if (runState === "PAUSED") {
-      setRunState("RUNNING");
-      addEvent("Trip resumed", "Vehicle moving again.");
+      setProgress(100);
+    },
+    []
+  );
+
+  const startTrip = async () => {
+    if (!selected || !ambulance?.ambulance_id) {
+      setError("Select an ambulance assignment first.");
       return;
     }
-    setBusy(true);
-    try {
-      if (leg === "TO_SCENE") {
-        await api.ambulanceSim.start(selected.ambulance.ambulance_id, { route_source: route.source, route_distance_km: Number(route.totalKm.toFixed(3)) });
-        addEvent("Trip started", `${selected.ambulance.ambulance_id} left ${selected.hospital?.name} for ${selected.incident.incident_id}. Incident is now EN_ROUTE.`);
-      } else {
-        addEvent("Transport started", `Driving the patient to ${selected.hospital?.name}.`);
-      }
-      setRunState("RUNNING");
-      await loadRows();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
+
+    if (!incidentPoint || !hospitalPoint) {
+      setError(
+        "This assignment is missing valid incident or hospital coordinates. Update the saved records first."
+      );
+      return;
     }
-  }
 
-  function pause() {
-    setRunState("PAUSED");
-    reportPosition();
-    addEvent("Trip paused", "Position frozen. The hospital keeps seeing the last reported point.");
-  }
+    if (!["DISPATCHED", "EN_ROUTE"].includes(incident?.status)) {
+      setError(
+        `The trip to the accident cannot start from incident status ${incident?.status || "UNKNOWN"}. Dispatch the ambulance first.`
+      );
+      return;
+    }
 
-  async function departScene() {
-    if (!selected) return;
     setBusy(true);
     setError("");
+    setMessage("");
+
     try {
-      await api.ambulanceSim.departScene(selected.ambulance.ambulance_id);
-      addEvent("Departed scene", `Patient on board. Heading to ${selected.hospital?.name}.`);
-      await loadRows();
-    } catch (e) {
-      setError(e.message);
+      const route = await getRoadRoute(hospitalPoint, incidentPoint);
+
+      await api.ambulanceSim.start(ambulance.ambulance_id, {
+        source: "SIMULATION",
+        route_source: "OSRM",
+        route_distance_km: route.distanceKm,
+      });
+
+      setVehiclePosition(hospitalPoint);
+      addActivity(
+        `${ambulance.ambulance_id} started toward incident ${incident.incident_id}.`
+      );
+
+      await animateLeg({
+        ambulanceId: ambulance.ambulance_id,
+        route,
+        phase: "TO_SCENE",
+      });
+
+      await api.ambulanceSim.arriveScene(ambulance.ambulance_id);
+
+      setVehiclePosition(incidentPoint);
+      setMessage("Ambulance arrived at the accident scene.");
+      addActivity(`Ambulance arrived at ${incident.incident_id}.`);
+
+      await refreshAfterAction();
+    } catch (err) {
+      setError(err.message || "Could not complete the trip to the accident.");
+      await refreshAfterAction().catch(() => {});
     } finally {
       setBusy(false);
     }
-  }
+  };
 
-  async function completeHandover() {
-    if (!selected) return;
+  const transportToHospital = async () => {
+    if (!selected || !ambulance?.ambulance_id) return;
+
+    if (!incidentPoint || !hospitalPoint) {
+      setError("The incident or hospital coordinates are missing.");
+      return;
+    }
+
+    if (
+      incident?.status !== "ARRIVED" ||
+      tracking?.phase === "COMPLETED"
+    ) {
+      setError(
+        "Transport can start after the ambulance reaches the accident scene."
+      );
+      return;
+    }
+
     setBusy(true);
     setError("");
+    setMessage("");
+
     try {
-      const id = selected.ambulance.ambulance_id;
-      await api.ambulanceSim.complete(id);
-      addEvent("Handover complete", `Incident resolved. ${id} is AVAILABLE again.`);
-      setRunState("COMPLETED");
-      setRoute(null);
-      await loadRows();
-    } catch (e) {
-      setError(e.message);
+      const route = await getRoadRoute(incidentPoint, hospitalPoint);
+
+      await api.ambulanceSim.departScene(ambulance.ambulance_id, {
+        route_source: "OSRM",
+        route_distance_km: route.distanceKm,
+      });
+
+      setVehiclePosition(incidentPoint);
+      addActivity(
+        `Transport started from incident ${incident.incident_id} to ${hospital.name}.`
+      );
+
+      await animateLeg({
+        ambulanceId: ambulance.ambulance_id,
+        route,
+        phase: "TO_HOSPITAL",
+      });
+
+      setVehiclePosition(hospitalPoint);
+      setMessage(
+        "The ambulance reached the hospital. Complete the trip to release the ambulance."
+      );
+      addActivity(`Ambulance reached ${hospital.name}.`);
+
+      await refreshAfterAction();
+    } catch (err) {
+      setError(err.message || "Could not complete hospital transport.");
+      await refreshAfterAction().catch(() => {});
     } finally {
       setBusy(false);
     }
-  }
+  };
 
-  function selectVehicle(id) {
-    setSelectedId(id);
-    setRunState("READY");
-    setReports({ count: 0, lastAt: null });
-  }
+  const completeTrip = async () => {
+    if (!ambulance?.ambulance_id) return;
 
-  // ---------------------------------------------------------------
-  // Derived values for display
-  // ---------------------------------------------------------------
-  const totalKm = route?.totalKm || 0;
-  const remainingKm = route ? Math.max(0, totalKm - distanceKm) : null;
-  const progress = totalKm ? Math.min(1, distanceKm / totalKm) : leg === "AT_SCENE" ? 1 : 0;
-  const etaSeconds = remainingKm != null ? (remainingKm / Math.max(speedKmh || 35, 15)) * 3600 : null;
-  const vehiclePoint = route ? pointAtDistance(route, distanceKm) : leg === "AT_SCENE" ? incidentPoint : hospitalPoint;
-  const driven = useMemo(() => (route ? drivenPath(route, distanceKm) : []), [route, distanceKm]);
-  const fitPoints = useMemo(() => {
-    if (route) return route.points;
-    return [hospitalPoint, incidentPoint].filter(Boolean);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [route, hospitalPoint?.[0], incidentPoint?.[0]]);
-  const activeRows = rows.filter((row) => ACTIVE_STATUSES.includes(row.ambulance.status) && row.incident);
-  const atHospital = runState === "ARRIVED_DESTINATION" && leg === "TO_HOSPITAL";
-  const phaseLabel = runState === "COMPLETED" ? PHASE_LABELS.COMPLETED : leg === "TO_SCENE" && runState === "READY" && selected?.ambulance.status === "ASSIGNED" ? "Waiting to start" : PHASE_LABELS[leg] || "No assignment";
-  const stateLabel = { READY: "READY", RUNNING: "DRIVING", PAUSED: "PAUSED", ARRIVED_DESTINATION: "ARRIVED", COMPLETED: "COMPLETED" }[runState];
+    setBusy(true);
+    setError("");
+    setMessage("");
 
-  let primaryAction = null;
-  if (selected && leg === "AT_SCENE") {
-    primaryAction = <button className="button primary" onClick={departScene} disabled={busy}>🏥 Depart to hospital</button>;
-  } else if (atHospital) {
-    primaryAction = <button className="button primary" onClick={completeHandover} disabled={busy}>✓ Complete handover</button>;
-  } else if (selected && route && (leg === "TO_SCENE" || leg === "TO_HOSPITAL")) {
-    primaryAction = <button className="button primary" onClick={startOrResume} disabled={busy || isRunning || runState === "ARRIVED_DESTINATION"}>▶ {runState === "PAUSED" ? "Resume trip" : leg === "TO_HOSPITAL" ? "Start transport" : "Start trip"}</button>;
-  }
+    try {
+      await api.ambulanceSim.complete(ambulance.ambulance_id);
+      setMessage("Trip completed. The ambulance is now available.");
+      addActivity(`Trip completed for ${incident?.incident_id || "incident"}.`);
 
-  if (loading) return <Loading label="Loading ambulance units..." />;
+      setProgress(100);
+      await refreshAfterAction();
+    } catch (err) {
+      setError(err.message || "Could not complete the ambulance trip.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
-  return <section className="ambulance-sim">
-    <div className="page-heading cc-heading">
-      <div>
-        <span className="eyebrow">AMBULANCE UNIT SIMULATION</span>
-        <h2>Ambulance Unit Simulator</h2>
-        <p>Act as the ambulance crew: drive a dispatched vehicle along the road route and stream its position to the backend so hospitals can track it live.</p>
-      </div>
-      <span className="live-pill"><span className={`status-dot ${isRunning ? "online" : ""}`} />{isRunning ? "DRIVING" : "STANDBY"}</span>
-    </div>
+  const incidentStatus = incident?.status || "NO ACTIVE INCIDENT";
+  const ambulanceStatus = ambulance?.status || "UNKNOWN";
+  const phase = tracking?.phase || "NOT STARTED";
 
-    <ErrorMessage message={error} />
+  const canStart =
+    !!ambulance?.ambulance_id &&
+    ["DISPATCHED", "EN_ROUTE"].includes(incident?.status);
 
-    <div className="cc-banner">
-      <strong>SIMULATED VEHICLE — POSITIONS ARE GENERATED BY THIS PAGE, NOT BY GPS</strong>
-      <span>Each position is sent to the backend through the same endpoint a real GPS unit would use, so the hospital's incident page tracks this vehicle live. Speed follows an urban ambulance profile (about 25–55 km/h); the demo clock can be accelerated.</span>
-    </div>
+  const canTransport =
+    incident?.status === "ARRIVED" &&
+    phase !== "TO_HOSPITAL" &&
+    phase !== "COMPLETED";
 
-    <div className="cc-metrics-grid">
-      <Metric label="Trip phase" value={phaseLabel} detail={selected ? `${selected.ambulance.ambulance_id} · ${stateLabel}` : "Select a vehicle"} />
-      <Metric label="Distance remaining" value={remainingKm != null ? `${remainingKm.toFixed(2)} km` : "—"} detail={route ? `of ${totalKm.toFixed(2)} km this leg` : "No active leg"} />
-      <Metric label="Road ETA" value={remainingKm != null ? formatDuration(etaSeconds) : "—"} detail={speedFactor > 1 && remainingKm ? `Demo clock: ${formatDuration(etaSeconds / speedFactor)}` : "At current speed"} />
-      <Metric label="Current speed" value={`${Math.round(speedKmh)} km/h`} detail={`Demo clock ${speedFactor}×`} />
-    </div>
+  const canComplete =
+    incident?.status === "ARRIVED" && phase === "TO_HOSPITAL";
 
-    <div className="cc-main-grid">
-      <div className="cc-map-panel">
-        <div className="cc-panel-heading">
-          <div><span className="eyebrow">LIVE ROUTE</span><h3>{leg === "TO_HOSPITAL" || atHospital ? "Scene → Hospital" : "Hospital → Accident scene"}</h3></div>
-          <span className="cc-sim-chip">{route?.source === "ROAD" ? "ROAD ROUTE" : route ? "APPROXIMATE ROUTE" : "SIMULATED VEHICLE"}</span>
+  const hasCoordinates = !!incidentPoint && !!hospitalPoint;
+
+  return (
+    <div className="ambulance-page">
+      <header className="ambulance-header">
+        <div>
+          <div className="ambulance-eyebrow">EMERGENCY RESPONSE SYSTEM</div>
+          <h1>Ambulance Command Center</h1>
+          <p>Live assignment data · Road routing · Ambulance trip tracking</p>
         </div>
 
-        {!selected || !selected.incident ? <div className="empty-state as-empty">
-          <h3>No ambulance on an active assignment</h3>
-          <p>{rows.length === 0 ? "No ambulances are registered yet. Admin → Ambulances → register a vehicle for a hospital." : "To create one: Live Feed detects an accident → a hospital clicks ACCEPT → on the incident page the hospital clicks Dispatch Ambulance."}</p>
-          <p className="muted-text">This page refreshes every few seconds and picks up new dispatches automatically.</p>
-        </div> : <>
-          <div className="cc-map-wrap">
-            <MapContainer center={hospitalPoint || incidentPoint || [18.5204, 73.8567]} zoom={14} scrollWheelZoom style={{ height: "430px", width: "100%" }}>
-              <TileLayer attribution="&copy; OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-              <FitRoute points={fitPoints} />
-              {route && <Polyline positions={route.points} pathOptions={{ color: "#64748b", weight: 5, opacity: 0.45, dashArray: "7 8" }} />}
-              {driven.length > 1 && <Polyline positions={driven} pathOptions={{ color: "#ef4444", weight: 5, opacity: 0.95 }} />}
-              {hospitalPoint && <CircleMarker center={hospitalPoint} radius={9} pathOptions={{ color: "#0f766e", fillColor: "#14b8a6", fillOpacity: 1 }}><Popup>{selected.hospital?.name}</Popup></CircleMarker>}
-              {incidentPoint && <Marker position={incidentPoint} icon={incidentIcon}><Popup>Accident {selected.incident.incident_id}</Popup></Marker>}
-              {vehiclePoint && <Marker position={vehiclePoint} icon={ambulanceIcon}><Popup>{selected.ambulance.ambulance_id} · {stateLabel}</Popup></Marker>}
+        <div className="ambulance-live-status">
+          <span className="status-dot" />
+          {loading ? "LOADING DATA" : "BACKEND CONNECTED"}
+        </div>
+      </header>
+
+      <section className="ambulance-stats">
+        <article className="ambulance-stat">
+          <span>Ambulance ID</span>
+          <strong>{ambulance?.ambulance_id || "—"}</strong>
+        </article>
+
+        <article className="ambulance-stat">
+          <span>Incident ID</span>
+          <strong>{incident?.incident_id || "No assignment"}</strong>
+        </article>
+
+        <article className="ambulance-stat">
+          <span>Severity</span>
+          <strong className="severity-high">
+            {titleCase(incident?.severity)}
+          </strong>
+        </article>
+
+        <article className="ambulance-stat">
+          <span>Ambulance status</span>
+          <strong>{titleCase(ambulanceStatus)}</strong>
+        </article>
+      </section>
+
+      {error && (
+        <div className="side-panel" role="alert">
+          <strong>Action needed</strong>
+          <p>{error}</p>
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={() => setError("")}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {message && (
+        <div className="side-panel" role="status">
+          {message}
+        </div>
+      )}
+
+      <main className="ambulance-layout">
+        <section className="map-panel">
+          <div className="panel-heading">
+            <div>
+              <h2>Ambulance Tracking Map</h2>
+              <p>Locations and assignment details from your backend</p>
+            </div>
+
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={loadAssignments}
+              disabled={loading || busy}
+            >
+              {loading ? "Refreshing..." : "Refresh Data"}
+            </button>
+          </div>
+
+          <div className="ambulance-map" style={{ height: 480, width: "100%" }}>
+            <MapContainer
+              center={DEFAULT_CENTER}
+              zoom={12}
+              scrollWheelZoom
+              style={{ height: "100%", width: "100%" }}
+            >
+              <TileLayer
+                attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+              />
+
+              <MapRecenter points={mapPoints} />
+
+              {incidentPoint && (
+                <Marker
+                  position={mapPosition(incidentPoint)}
+                  icon={accidentIcon}
+                >
+                  <Popup>
+                    <strong>Accident: {incident?.incident_id}</strong>
+                    <br />
+                    Severity: {titleCase(incident?.severity)}
+                    <br />
+                    Status: {titleCase(incident?.status)}
+                    <br />
+                    {incidentPoint.latitude}, {incidentPoint.longitude}
+                  </Popup>
+                </Marker>
+              )}
+
+              {hospitalPoint && (
+                <Marker
+                  position={mapPosition(hospitalPoint)}
+                  icon={hospitalIcon}
+                >
+                  <Popup>
+                    <strong>{hospital?.name || "Assigned hospital"}</strong>
+                    <br />
+                    Hospital ID: {hospital?.hospital_id || "—"}
+                    <br />
+                    {hospitalPoint.latitude}, {hospitalPoint.longitude}
+                  </Popup>
+                </Marker>
+              )}
+
+              {routeCoordinates.length > 0 && (
+                <Polyline
+                  positions={routeCoordinates}
+                  pathOptions={{
+                    color: "#2563eb",
+                    weight: 5,
+                    opacity: 0.85,
+                  }}
+                />
+              )}
+
+              {currentPosition && (
+                <Marker
+                  position={mapPosition(currentPosition)}
+                  icon={ambulanceIcon}
+                >
+                  <Popup>
+                    <strong>{ambulance?.ambulance_id || "Ambulance"}</strong>
+                    <br />
+                    Status: {titleCase(ambulanceStatus)}
+                    <br />
+                    Phase: {titleCase(phase)}
+                    <br />
+                    {currentPosition.latitude}, {currentPosition.longitude}
+                  </Popup>
+                </Marker>
+              )}
+
+              {tracking?.position && (
+                <CircleMarker
+                  center={[
+                    tracking.position.latitude,
+                    tracking.position.longitude,
+                  ]}
+                  radius={5}
+                  pathOptions={{ color: "#15803d", fillOpacity: 0.7 }}
+                >
+                  <Popup>Latest position saved by the backend</Popup>
+                </CircleMarker>
+              )}
             </MapContainer>
           </div>
-          <div className="cc-route-metrics">
-            <Metric label="Leg length" value={route ? `${totalKm.toFixed(2)} km` : routeLoading ? "Loading…" : "—"} detail={route?.source === "ROAD" ? "OpenStreetMap road network (OSRM)" : route ? "Routing service unreachable — approximated" : ""} />
-            <Metric label="Positions sent" value={reports.count} detail={`Last: ${formatAgo(reports.lastAt)}`} />
-            <Metric label="Hospital sees" value={selected.incident.status} detail={selected.incident.tracking?.phase ? PHASE_LABELS[selected.incident.tracking.phase] : "Not started"} />
-          </div>
-          <div className="cc-progress">
-            <div className="cc-progress-label"><span>Leg progress</span><strong>{Math.round(progress * 100)}%</strong></div>
-            <div className="cc-progress-track"><span style={{ width: `${progress * 100}%` }} /></div>
-          </div>
-          <div className="cc-controls">
-            {primaryAction}
-            <button className="button secondary" onClick={pause} disabled={!isRunning}>Ⅱ Pause</button>
-            <span className="cc-state-text">Status: <b>{stateLabel}</b></span>
-          </div>
-        </>}
-      </div>
 
-      <aside className="cc-side-column">
-        <div className="cc-panel">
-          <div className="cc-panel-heading"><div><span className="eyebrow">VEHICLE</span><h3>Ambulance unit</h3></div><span className="cc-count">{activeRows.length} active</span></div>
-          <div className="form-stack">
-            <label>Ambulance
-              <select value={selectedId} onChange={(e) => selectVehicle(e.target.value)} disabled={isRunning}>
-                <option value="">Select a vehicle</option>
-                {rows.map((row) => <option key={row.ambulance.ambulance_id} value={row.ambulance.ambulance_id}>
-                  {row.ambulance.ambulance_id} · {row.ambulance.hospital_name || row.ambulance.hospital_id} · {row.ambulance.status}{row.incident ? ` → ${row.incident.incident_id}` : ""}
-                </option>)}
-              </select>
-            </label>
-            <label>Demo clock
-              <select value={speedFactor} onChange={(e) => setSpeedFactor(Number(e.target.value))}>
-                {SPEED_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-              </select>
-            </label>
+          <div className="map-legend">
+            <span>! Accident</span>
+            <span>H Hospital</span>
+            <span>🚑 Ambulance</span>
+            <span>Blue line: OSRM road route</span>
           </div>
-        </div>
 
-        {selected?.incident && <div className="cc-panel">
-          <div className="cc-panel-heading"><div><span className="eyebrow">ASSIGNMENT</span><h3>{selected.incident.incident_id}</h3></div><span className="cc-sim-chip">{selected.incident.status}</span></div>
-          <div className="cc-resource-row"><span>Severity</span><b>{selected.incident.severity || "—"}</b></div>
-          <div className="cc-resource-row"><span>Detection confidence</span><b>{selected.incident.confidence != null ? `${Math.round(Number(selected.incident.confidence) * 100)}%` : "—"}</b></div>
-          <div className="cc-resource-row"><span>Camera</span><b>{selected.incident.camera_id || "—"}</b></div>
-          <div className="cc-resource-row"><span>Base hospital</span><b>{selected.hospital?.name || "—"}</b></div>
-          <div className="cc-resource-row"><span>Vehicle type</span><b>{selected.ambulance.vehicle_type || "—"}</b></div>
-          <div className="cc-resource-row"><span>Vehicle status</span><b>{selected.ambulance.status}</b></div>
-        </div>}
+          <p className="map-disclaimer">
+            The map uses saved coordinates and road geometry. Trip movement is
+            simulated by this page and stored by your backend; OSRM does not
+            provide live traffic conditions.
+          </p>
+        </section>
 
-        <div className="cc-panel">
-          <div className="cc-panel-heading"><div><span className="eyebrow">EVENT STREAM</span><h3>Trip timeline</h3></div><span className="cc-count">{events.length}</span></div>
-          <div className="cc-timeline">{events.map((event) => <div className="cc-event" key={event.id}><span className="cc-event-dot" /><div><div className="cc-event-title">{event.title}<time>{event.time}</time></div><p>{event.detail}</p></div></div>)}</div>
-        </div>
-      </aside>
+        <aside className="ambulance-sidebar">
+          <section className="side-panel">
+            <h2>Ambulance Assignments</h2>
+            <p className="side-description">
+              Select an assignment returned by your Flask API.
+            </p>
+
+            {loading ? (
+              <p>Loading assignments from the backend…</p>
+            ) : assignments.length === 0 ? (
+              <p className="empty-notifications">
+                No ambulance records were returned. Register an ambulance and
+                dispatch it to an incident first.
+              </p>
+            ) : (
+              <label className="assignment-select-label">
+                Select ambulance
+                <select
+                  value={selectedId}
+                  onChange={(event) => {
+                    setSelectedId(event.target.value);
+                    setRouteCoordinates([]);
+                    setRouteInfo(null);
+                    setVehiclePosition(null);
+                    setProgress(0);
+                    setError("");
+                    setMessage("");
+                  }}
+                  disabled={busy}
+                >
+                  {assignments.map((row) => {
+                    const id = getAssignmentId(row);
+                    return (
+                      <option key={id || JSON.stringify(row)} value={id}>
+                        {id || "Unnamed ambulance"} —{" "}
+                        {row?.incident?.incident_id || "Unassigned"} (
+                        {titleCase(row?.ambulance?.status)})
+                      </option>
+                    );
+                  })}
+                </select>
+              </label>
+            )}
+
+            {selected && (
+              <>
+                <div className="selected-hospital-summary">
+                  <span>Assigned incident</span>
+                  <strong>{incident?.incident_id || "No incident"}</strong>
+                  <p>Status: {titleCase(incidentStatus)}</p>
+                  <small>
+                    Severity: {titleCase(incident?.severity)} · Camera:{" "}
+                    {incident?.camera_id || "—"}
+                  </small>
+                </div>
+
+                <div className="selected-hospital-summary">
+                  <span>Destination hospital</span>
+                  <strong>{hospital?.name || "No hospital assigned"}</strong>
+                  <p>Hospital ID: {hospital?.hospital_id || "—"}</p>
+                  <small>
+                    {hospitalPoint
+                      ? `${hospitalPoint.latitude}, ${hospitalPoint.longitude}`
+                      : "Hospital coordinates are missing"}
+                  </small>
+                </div>
+
+                {!hasCoordinates && (
+                  <p role="alert">
+                    This assignment cannot be routed until both the incident
+                    and hospital have valid latitude/longitude fields.
+                  </p>
+                )}
+
+                <button
+                  type="button"
+                  className="primary-action"
+                  onClick={startTrip}
+                  disabled={busy || loading || !canStart || !hasCoordinates}
+                >
+                  {busy ? "Processing trip…" : "Start Trip to Accident"}
+                </button>
+
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={transportToHospital}
+                  disabled={busy || loading || !canTransport || !hasCoordinates}
+                >
+                  Transport to Hospital
+                </button>
+
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={completeTrip}
+                  disabled={busy || loading || !canComplete}
+                >
+                  Complete Trip
+                </button>
+              </>
+            )}
+          </section>
+
+          <section className="side-panel incident-panel">
+            <h2>Trip Details</h2>
+
+            <div className="detail-row">
+              <span>Incident status</span>
+              <strong>{titleCase(incidentStatus)}</strong>
+            </div>
+
+            <div className="detail-row">
+              <span>Tracking phase</span>
+              <strong>{titleCase(phase)}</strong>
+            </div>
+
+            <div className="detail-row">
+              <span>Route distance</span>
+              <strong>
+                {routeInfo ? `${formatNumber(routeInfo.distanceKm)} km` : "—"}
+              </strong>
+            </div>
+
+            <div className="detail-row">
+              <span>Estimated road time</span>
+              <strong>
+                {routeInfo
+                  ? `${Math.ceil(routeInfo.durationMinutes)} min`
+                  : "—"}
+              </strong>
+            </div>
+
+            <div className="detail-row">
+              <span>Route progress</span>
+              <strong>{progress}%</strong>
+            </div>
+
+            <div className="progress-track">
+              <div
+                className="progress-fill"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+
+            <small>
+              Route time is the routing service's estimate, not live traffic
+              ETA.
+            </small>
+          </section>
+
+          <section className="side-panel">
+            <h2>Activity & Notifications</h2>
+
+            {activity.length === 0 ? (
+              <p className="empty-notifications">
+                No actions yet. Choose a dispatched assignment to begin.
+              </p>
+            ) : (
+              <ul className="notification-list">
+                {activity.map((item) => (
+                  <li key={item.id}>
+                    <strong>{item.time}</strong>
+                    <br />
+                    {item.text}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </aside>
+      </main>
+
+      <footer className="ambulance-footer">
+        Academic project demonstration. This page reads real application
+        records and writes simulated trip positions to the backend; it does not
+        contact or dispatch a real emergency service.
+      </footer>
     </div>
-
-    <div className="panel as-fleet">
-      <div className="panel-header"><div><h3>Fleet overview</h3><span>Every registered vehicle and the last position it reported.</span></div><button className="button secondary" onClick={loadRows}>Refresh</button></div>
-      {rows.length === 0 ? <p className="muted-text">No ambulances registered yet.</p> : <div className="table-scroll"><table className="data-table">
-        <thead><tr><th>Vehicle</th><th>Hospital</th><th>Type</th><th>Status</th><th>Incident</th><th>Last position</th></tr></thead>
-        <tbody>{rows.map((row) => <tr key={row.ambulance.ambulance_id}>
-          <td>{row.ambulance.ambulance_id}</td>
-          <td>{row.ambulance.hospital_name || row.ambulance.hospital_id}</td>
-          <td>{row.ambulance.vehicle_type}</td>
-          <td>{row.ambulance.status}</td>
-          <td>{row.incident?.incident_id || "—"}</td>
-          <td>{row.ambulance.last_position ? `${formatAgo(row.ambulance.last_position.recorded_at)} · ${row.ambulance.last_position.source || "SIMULATION"}` : "—"}</td>
-        </tr>)}</tbody>
-      </table></div>}
-    </div>
-  </section>;
+  );
 }

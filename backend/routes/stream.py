@@ -35,11 +35,12 @@ def resolve_paths():
     sample_video_dir = project_root / "sample_videos"
 
     python_path = (
-        ml_dir
-        / "venv"
-        / "Scripts"
-        / "python.exe"
+       ml_dir
+       / ".venv"
+       / "Scripts"
+       / "python.exe"
     )
+
 
     worker_path = (
         ml_dir

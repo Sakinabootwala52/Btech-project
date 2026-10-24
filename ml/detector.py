@@ -51,6 +51,6 @@ class VehicleDetector:
                 "center": [(x1 + x2) / 2, (y1 + y2) / 2],
                 "width": x2 - x1,
                 "height": y2 - y1,
-            })
+            },)
 
         return detections

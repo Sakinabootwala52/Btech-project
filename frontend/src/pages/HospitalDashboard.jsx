@@ -1,73 +1,33 @@
 import { useEffect, useMemo, useState } from "react";
-import {
-  Link,
-  useNavigate,
-} from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../api";
 import Loading from "../components/Loading";
 import ErrorMessage from "../components/ErrorMessage";
 import MapView from "../components/MapView";
-import {
-  formatConfidence,
-  formatDate,
-} from "../utils";
+import { formatConfidence, formatDate } from "../utils";
 
+// ============================================================
+// DISTANCE HELPER
+// ============================================================
 
-function distanceKm(
-  lat1,
-  lon1,
-  lat2,
-  lon2
-) {
-  const toRadians = (
-    value
-  ) => (
-    value * Math.PI
-  ) / 180;
-
+function distanceKm(lat1, lon1, lat2, lon2) {
+  const toRadians = (value) => (value * Math.PI) / 180;
   const earthRadius = 6371;
 
-  const dLat = toRadians(
-    lat2 - lat1
-  );
-
-  const dLon = toRadians(
-    lon2 - lon1
-  );
+  const dLat = toRadians(lat2 - lat1);
+  const dLon = toRadians(lon2 - lon1);
 
   const a =
-    Math.sin(
-      dLat / 2
-    ) *
-      Math.sin(
-        dLat / 2
-      ) +
-    Math.cos(
-      toRadians(lat1)
-    ) *
-      Math.cos(
-        toRadians(lat2)
-      ) *
-      Math.sin(
-        dLon / 2
-      ) *
-      Math.sin(
-        dLon / 2
-      );
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRadians(lat1)) *
+      Math.cos(toRadians(lat2)) *
+      Math.sin(dLon / 2) ** 2;
 
-  const c =
-    2 *
-    Math.atan2(
-      Math.sqrt(a),
-      Math.sqrt(1 - a)
-    );
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 
-  return (
-    earthRadius * c
-  );
+  return earthRadius * c;
 }
-
 
 // ============================================================
 // STATUS HELPERS
@@ -81,277 +41,152 @@ const TRACKING_STEPS = [
   "RESOLVED",
 ];
 
-
-function statusLabel(
-  status
-) {
+function statusLabel(status) {
   const labels = {
-    RESPONSE_ACCEPTED:
-      "Response Accepted",
-
-    DISPATCHED:
-      "Ambulance Dispatched",
-
-    EN_ROUTE:
-      "Ambulance En Route",
-
-    ARRIVED:
-      "Ambulance Arrived",
-
-    RESOLVED:
-      "Case Resolved",
-
-    REJECTED:
-      "Rejected",
-
-    PENDING:
-      "Pending",
+    RESPONSE_ACCEPTED: "Response Accepted",
+    DISPATCHED: "Ambulance Dispatched",
+    EN_ROUTE: "Ambulance En Route",
+    ARRIVED: "Ambulance Arrived",
+    RESOLVED: "Case Resolved",
+    REJECTED: "Rejected",
+    PENDING: "Pending",
   };
 
-  return (
-    labels[status] ||
-    status ||
-    "Unknown"
-  );
+  return labels[status] || status || "Unknown";
 }
 
-
-function stepIndex(
-  status
-) {
-  const index =
-    TRACKING_STEPS.indexOf(
-      status
-    );
-
-  return index >= 0
-    ? index
-    : 0;
+function stepIndex(status) {
+  const index = TRACKING_STEPS.indexOf(status);
+  return index >= 0 ? index : 0;
 }
 
-
-function isActiveCase(
-  status
-) {
+function isActiveCase(status) {
   return [
     "RESPONSE_ACCEPTED",
     "DISPATCHED",
     "EN_ROUTE",
     "ARRIVED",
-  ].includes(
-    status
-  );
+  ].includes(status);
 }
-
 
 // ============================================================
 // TRACKING COMPONENT
 // ============================================================
 
-function CaseTracking({
-  status,
-}) {
-  const currentIndex =
-    stepIndex(status);
+function CaseTracking({ status }) {
+  const currentIndex = stepIndex(status);
 
   return (
     <div
       style={{
         display: "flex",
         alignItems: "flex-start",
-        gap: "0",
+        gap: 0,
         width: "100%",
-        marginTop: "18px",
-        marginBottom: "6px",
+        marginTop: 18,
+        marginBottom: 6,
       }}
     >
-      {TRACKING_STEPS.map(
-        (
-          step,
-          index
-        ) => {
+      {TRACKING_STEPS.map((step, index) => {
+        const completed = index < currentIndex;
+        const current = index === currentIndex;
+        const pending = index > currentIndex;
 
-          const completed =
-            index <
-            currentIndex;
+        return (
+          <div
+            key={step}
+            style={{
+              flex: 1,
+              position: "relative",
+              minWidth: 0,
+            }}
+          >
+            {index < TRACKING_STEPS.length - 1 && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: 11,
+                  left: "50%",
+                  width: "100%",
+                  height: 2,
+                  background:
+                    completed || current ? "#22c55e" : "#e5e7eb",
+                  zIndex: 0,
+                }}
+              />
+            )}
 
-          const current =
-            index ===
-            currentIndex;
-
-          const pending =
-            index >
-            currentIndex;
-
-          return (
             <div
-              key={step}
               style={{
-                flex: 1,
-                position:
-                  "relative",
-                minWidth: 0,
+                position: "relative",
+                zIndex: 1,
+                display: "flex",
+                justifyContent: "center",
               }}
             >
-
-              {index <
-                TRACKING_STEPS.length -
-                  1 && (
-                <div
-                  style={{
-                    position:
-                      "absolute",
-                    top: "11px",
-                    left: "50%",
-                    width: "100%",
-                    height: "2px",
-                    background:
-                      completed ||
-                      current
-                        ? "#22c55e"
-                        : "#e5e7eb",
-                    zIndex: 0,
-                  }}
-                />
-              )}
-
               <div
                 style={{
-                  position:
-                    "relative",
-                  zIndex: 1,
-                  display:
-                    "flex",
-                  justifyContent:
-                    "center",
-                }}
-              >
-
-                <div
-                  style={{
-                    width:
-                      "24px",
-                    height:
-                      "24px",
-                    borderRadius:
-                      "50%",
-                    display:
-                      "flex",
-                    alignItems:
-                      "center",
-                    justifyContent:
-                      "center",
-                    fontSize:
-                      "12px",
-                    fontWeight:
-                      800,
-                    background:
-                      completed ||
-                      current
-                        ? "#22c55e"
-                        : "#ffffff",
-                    color:
-                      completed ||
-                      current
-                        ? "#ffffff"
-                        : "#64748b",
-                    border:
-                      pending
-                        ? "2px solid #dbe1e8"
-                        : "2px solid #22c55e",
-                    boxSizing:
-                      "border-box",
-                  }}
-                >
-                  {completed
-                    ? "✓"
-                    : index + 1}
-                </div>
-
-              </div>
-
-              <div
-                style={{
-                  textAlign:
-                    "center",
-                  marginTop:
-                    "8px",
-                  padding:
-                    "0 3px",
-                  fontSize:
-                    "10px",
-                  fontWeight:
-                    current
-                      ? 800
-                      : 600,
+                  width: 24,
+                  height: 24,
+                  borderRadius: "50%",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 12,
+                  fontWeight: 800,
+                  background:
+                    completed || current ? "#22c55e" : "#ffffff",
                   color:
-                    current
-                      ? "#111827"
-                      : completed
-                        ? "#16a34a"
-                        : "#94a3b8",
-                  lineHeight:
-                    1.25,
+                    completed || current ? "#ffffff" : "#64748b",
+                  border: pending
+                    ? "2px solid #dbe1e8"
+                    : "2px solid #22c55e",
+                  boxSizing: "border-box",
                 }}
               >
-                {statusLabel(
-                  step
-                )}
+                {completed ? "✓" : index + 1}
               </div>
-
             </div>
-          );
-        }
-      )}
+
+            <div
+              style={{
+                textAlign: "center",
+                marginTop: 8,
+                padding: "0 3px",
+                fontSize: 10,
+                fontWeight: current ? 800 : 600,
+                color: current
+                  ? "#111827"
+                  : completed
+                    ? "#16a34a"
+                    : "#94a3b8",
+                lineHeight: 1.25,
+              }}
+            >
+              {statusLabel(step)}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-
 // ============================================================
-// MAIN DASHBOARD
+// MAIN HOSPITAL DASHBOARD
 // ============================================================
 
 export default function HospitalDashboard() {
+  const navigate = useNavigate();
 
-  const navigate =
-    useNavigate();
-
-  const [
-    hospital,
-    setHospital,
-  ] = useState(null);
-
-  const [
-    alerts,
-    setAlerts,
-  ] = useState([]);
-
-  const [
-    stats,
-    setStats,
-  ] = useState(null);
-
-  const [
-    availableHospitals,
-    setAvailableHospitals,
-  ] = useState([]);
-
-  const [
-    activeCases,
-    setActiveCases,
-  ] = useState([]);
-
-  const [
-    error,
-    setError,
-  ] = useState("");
-
-  const [
-    loading,
-    setLoading,
-  ] = useState(true);
-
+  const [hospital, setHospital] = useState(null);
+  const [alerts, setAlerts] = useState([]);
+  const [stats, setStats] = useState(null);
+  const [availableHospitals, setAvailableHospitals] = useState([]);
+  const [activeCases, setActiveCases] = useState([]);
+  const [mapIncidents, setMapIncidents] = useState([]);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
 
   // ==========================================================
   // LOAD PENDING ALERTS
@@ -359,1063 +194,596 @@ export default function HospitalDashboard() {
 
   async function loadPending() {
     try {
+      const pending = await api.incidents.pending();
 
-      const pending =
-        await api.incidents.pending();
-
-      setAlerts(
-        Array.isArray(
-          pending
-        )
-          ? pending
-          : []
-      );
-
+      setAlerts(Array.isArray(pending) ? pending : []);
     } catch (e) {
-
-      console.error(
-        "Pending incident poll failed:",
-        e
-      );
+      console.error("Pending incident poll failed:", e);
     }
   }
 
+  // ==========================================================
+  // LOAD INCIDENTS FOR THE MAP
+  // ==========================================================
+
+  async function loadMapIncidents() {
+    try {
+      const data = await api.incidents.mapIncidents();
+
+      setMapIncidents(Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error("Map incidents loading failed:", e);
+    }
+  }
 
   // ==========================================================
   // LOAD ACTIVE ACCEPTED CASES
   // ==========================================================
 
   async function loadActiveCases() {
-
     try {
+      const history = await api.incidents.history();
 
-      const history =
-        await api.incidents.history();
-
-      if (
-        !Array.isArray(
-          history
-        )
-      ) {
-        setActiveCases(
-          []
-        );
-
+      if (!Array.isArray(history)) {
+        setActiveCases([]);
         return;
       }
 
-      /*
-       * /hospital/history returns attendance records.
-       *
-       * Each accepted case contains incident_id.
-       *
-       * We then fetch the latest incident state so the
-       * dashboard can show:
-       *
-       * RESPONSE_ACCEPTED
-       * DISPATCHED
-       * EN_ROUTE
-       * ARRIVED
-       * RESOLVED
-       */
+      const detailedCases = await Promise.all(
+        history.map(async (record) => {
+          if (!record?.incident_id) {
+            return null;
+          }
 
-      const detailedCases =
-        await Promise.all(
-          history.map(
-            async (
-              record
-            ) => {
+          try {
+            const incident = await api.incidents.get(
+              record.incident_id
+            );
 
-              if (
-                !record?.incident_id
-              ) {
-                return null;
-              }
+            return {
+              ...record,
+              ...incident,
+            };
+          } catch (e) {
+            console.error(
+              "Could not load incident:",
+              record.incident_id,
+              e
+            );
 
-              try {
-
-                const incident =
-                  await api.incidents.get(
-                    record.incident_id
-                  );
-
-                return {
-                  ...record,
-                  ...incident,
-                };
-
-              } catch (e) {
-
-                console.error(
-                  "Could not load incident:",
-                  record.incident_id,
-                  e
-                );
-
-                return {
-                  ...record,
-                };
-              }
-            }
-          )
-        );
-
-      const active =
-        detailedCases
-          .filter(
-            Boolean
-          )
-          .filter(
-            (item) =>
-              isActiveCase(
-                item.status
-              )
-          );
-
-      setActiveCases(
-        active
+            return { ...record };
+          }
+        })
       );
 
+      const active = detailedCases
+        .filter(Boolean)
+        .filter((item) => isActiveCase(item.status));
+
+      setActiveCases(active);
     } catch (e) {
-
-      console.error(
-        "Active cases loading failed:",
-        e
-      );
+      console.error("Active cases loading failed:", e);
     }
   }
-
 
   // ==========================================================
   // FULL DASHBOARD LOAD
   // ==========================================================
 
   async function loadDashboard() {
-
     try {
-
       setError("");
 
-      const [
-        hospitalData,
-        statsData,
-        hospitalsData,
-      ] = await Promise.all([
-        api.hospitals.me(),
+      const [hospitalData, statsData, hospitalsData] =
+        await Promise.all([
+          api.hospitals.me(),
+          api.incidents.stats(),
+          api.hospitals.available(),
+        ]);
 
-        api.incidents.stats(),
-
-        api.hospitals.available(),
-      ]);
-
-      setHospital(
-        hospitalData
-      );
-
-      setStats(
-        statsData
-      );
+      setHospital(hospitalData);
+      setStats(statsData);
 
       setAvailableHospitals(
-        Array.isArray(
-          hospitalsData
-        )
-          ? hospitalsData
-          : []
+        Array.isArray(hospitalsData) ? hospitalsData : []
       );
 
       await Promise.all([
         loadPending(),
         loadActiveCases(),
+        loadMapIncidents(),
       ]);
-
     } catch (e) {
-
-      setError(
-        e.message
-      );
-
+      setError(e?.message || "Failed to load hospital dashboard.");
     } finally {
-
-      setLoading(
-        false
-      );
+      setLoading(false);
     }
   }
-
 
   // ==========================================================
   // POLLING
   // ==========================================================
 
   useEffect(() => {
+    let mounted = true;
 
-    loadDashboard();
+    const safelyRun = async (callback) => {
+      if (!mounted) return;
 
-    /*
-     * Pending emergency alerts are polled quickly.
-     */
-    const pendingTimer =
-      setInterval(
-        loadPending,
-        750
-      );
-
-    /*
-     * Active accepted cases also need to update
-     * when ambulance status changes.
-     */
-    const activeCaseTimer =
-      setInterval(
-        loadActiveCases,
-        2000
-      );
-
-    /*
-     * Hospital resources/stats/map data can be slower.
-     */
-    const dashboardTimer =
-      setInterval(
-        loadDashboard,
-        5000
-      );
-
-    return () => {
-
-      clearInterval(
-        pendingTimer
-      );
-
-      clearInterval(
-        activeCaseTimer
-      );
-
-      clearInterval(
-        dashboardTimer
-      );
+      try {
+        await callback();
+      } catch (e) {
+        console.error("Dashboard polling failed:", e);
+      }
     };
 
-  }, []);
+    safelyRun(loadDashboard);
 
+    const pendingTimer = setInterval(() => {
+      safelyRun(loadPending);
+    }, 1500);
+
+    const activeCaseTimer = setInterval(() => {
+      safelyRun(loadActiveCases);
+    }, 3000);
+
+    const mapIncidentTimer = setInterval(() => {
+      safelyRun(loadMapIncidents);
+    }, 5000);
+
+    const dashboardTimer = setInterval(() => {
+      safelyRun(loadDashboard);
+    }, 15000);
+
+    return () => {
+      mounted = false;
+
+      clearInterval(pendingTimer);
+      clearInterval(activeCaseTimer);
+      clearInterval(mapIncidentTimer);
+      clearInterval(dashboardTimer);
+    };
+  }, []);
 
   // ==========================================================
   // ACTIVE INCIDENT
   // ==========================================================
 
-  const activeIncident =
-    alerts.length > 0
-      ? alerts[0]
-      : null;
-
+  const activeIncident = alerts.length > 0 ? alerts[0] : null;
 
   // ==========================================================
   // RECOMMENDED HOSPITAL
   // ==========================================================
 
-  const recommendedHospital =
-    useMemo(() => {
+  const recommendedHospital = useMemo(() => {
+    if (
+      !activeIncident ||
+      activeIncident.latitude == null ||
+      activeIncident.longitude == null
+    ) {
+      return null;
+    }
 
-      if (
-        !activeIncident ||
-        activeIncident.latitude ==
-          null ||
-        activeIncident.longitude ==
-          null
-      ) {
-        return null;
+    const incidentLat = Number(activeIncident.latitude);
+    const incidentLon = Number(activeIncident.longitude);
+
+    if (
+      !Number.isFinite(incidentLat) ||
+      !Number.isFinite(incidentLon)
+    ) {
+      return null;
+    }
+
+    const candidates = availableHospitals.filter((item) => {
+      if (item.latitude == null || item.longitude == null) {
+        return false;
       }
 
-      const candidates =
-        availableHospitals.filter(
-          (item) =>
-            item.latitude !=
-              null &&
-            item.longitude !=
-              null
-        );
+      return (
+        Number.isFinite(Number(item.latitude)) &&
+        Number.isFinite(Number(item.longitude))
+      );
+    });
 
-      if (
-        candidates.length === 0
-      ) {
-        return null;
-      }
+    if (candidates.length === 0) {
+      return null;
+    }
 
-      let best = null;
+    let best = null;
 
-      for (
-        const hospitalItem
-        of candidates
-      ) {
-
-        const distance =
-          distanceKm(
-            Number(
-              activeIncident.latitude
-            ),
-
-            Number(
-              activeIncident.longitude
-            ),
-
-            Number(
-              hospitalItem.latitude
-            ),
-
-            Number(
-              hospitalItem.longitude
-            )
-          );
-
-        if (
-          best === null ||
-          distance <
-            best.distance
-        ) {
-
-          best = {
-            ...hospitalItem,
-            distance,
-          };
-        }
-      }
-
-      return best;
-
-    }, [
-      activeIncident,
-      availableHospitals,
-    ]);
-
-
-  // ==========================================================
-  // ACCEPT
-  // ==========================================================
-
-  async function accept(
-    incidentId
-  ) {
-
-    try {
-
-      await api.incidents.accept(
-        incidentId
+    for (const hospitalItem of candidates) {
+      const distance = distanceKm(
+        incidentLat,
+        incidentLon,
+        Number(hospitalItem.latitude),
+        Number(hospitalItem.longitude)
       );
 
-      /*
-       * Do NOT call loadDashboard first.
-       *
-       * Once accepted, /pending no longer contains
-       * the incident. Navigate immediately.
-       */
+      if (best === null || distance < best.distance) {
+        best = {
+          ...hospitalItem,
+          distance,
+        };
+      }
+    }
+
+    return best;
+  }, [activeIncident, availableHospitals]);
+
+  // ==========================================================
+  // ACCEPT INCIDENT
+  // ==========================================================
+
+  async function accept(incidentId) {
+    try {
+      setError("");
+
+      await api.incidents.accept(incidentId);
+
       navigate(
-        `/hospital/incidents/${encodeURIComponent(
-          incidentId
-        )}`
+        `/hospital/incidents/${encodeURIComponent(incidentId)}`
       );
-
     } catch (e) {
-
-      setError(
-        e.message
-      );
+      setError(e?.message || "Could not accept the incident.");
     }
   }
 
-
   // ==========================================================
-  // REJECT
+  // REJECT INCIDENT
   // ==========================================================
 
-  async function reject(
-    incidentId
-  ) {
-
+  async function reject(incidentId) {
     try {
+      setError("");
 
-      await api.incidents.reject(
-        incidentId
-      );
+      await api.incidents.reject(incidentId);
 
-      await loadPending();
-
+      await Promise.all([
+        loadPending(),
+        loadMapIncidents(),
+      ]);
     } catch (e) {
-
-      setError(
-        e.message
-      );
+      setError(e?.message || "Could not reject the incident.");
     }
   }
-
 
   // ==========================================================
   // LOADING
   // ==========================================================
 
   if (loading) {
-
-    return (
-      <Loading
-        label="Loading emergency dashboard..."
-      />
-    );
+    return <Loading label="Loading emergency dashboard..." />;
   }
 
-
   // ==========================================================
-  // UI
+  // DASHBOARD UI
   // ==========================================================
 
   return (
     <section>
-
-      {/* ======================================================
-          PAGE HEADER
-      ====================================================== */}
+      {/* PAGE HEADER */}
 
       <div className="page-heading">
-
         <div>
+          <span className="eyebrow">LIVE ACCIDENT QUEUE</span>
 
-          <span className="eyebrow">
-            LIVE ACCIDENT QUEUE
-          </span>
-
-          <h2>
-            Upcoming accidents
-          </h2>
+          <h2>Upcoming accidents</h2>
 
           <p>
-            Accident alerts are sent directly
-            from the live detection service.
+            Accident alerts are sent directly from the live
+            detection service.
           </p>
-
         </div>
-
 
         <span
           className={`availability-chip ${
-            hospital?.emergency_available
-              ? "on"
-              : "off"
+            hospital?.emergency_available ? "on" : "off"
           }`}
         >
           {hospital?.emergency_available
             ? "AVAILABLE"
             : "UNAVAILABLE"}
         </span>
-
       </div>
 
+      <ErrorMessage message={error} />
 
-      <ErrorMessage
-        message={error}
-      />
-
-
-      {/* ======================================================
-          STATS
-      ====================================================== */}
+      {/* STATS */}
 
       <div className="stats-grid">
-
         <div className="stat-card danger">
-
-          <span className="stat-label">
-            Live alerts
-          </span>
-
-          <strong className="stat-value">
-            {alerts.length}
-          </strong>
-
+          <span className="stat-label">Live alerts</span>
+          <strong className="stat-value">{alerts.length}</strong>
           <span className="stat-detail">
             Pending hospital response
           </span>
-
         </div>
 
-
         <div className="stat-card">
-
-          <span className="stat-label">
-            Active responses
-          </span>
-
+          <span className="stat-label">Active responses</span>
           <strong className="stat-value">
             {activeCases.length}
           </strong>
-
           <span className="stat-detail">
             Accepted cases in progress
           </span>
-
         </div>
-
 
         <div className="stat-card">
-
-          <span className="stat-label">
-            Attended this month
-          </span>
-
+          <span className="stat-label">Attended this month</span>
           <strong className="stat-value">
-            {stats?.attended_this_month ??
-              0}
+            {stats?.attended_this_month ?? 0}
           </strong>
-
-          <span className="stat-detail">
-            Your hospital
-          </span>
-
+          <span className="stat-detail">Your hospital</span>
         </div>
-
 
         <div className="stat-card">
-
-          <span className="stat-label">
-            Ambulances
-          </span>
-
+          <span className="stat-label">Ambulances</span>
           <strong className="stat-value">
-            {
-              (hospital?.resources
-                ?.small_ambulances ??
-                0) +
-              (hospital?.resources
-                ?.large_ambulances ??
-                0)
-            }
+            {(hospital?.resources?.small_ambulances ?? 0) +
+              (hospital?.resources?.large_ambulances ?? 0)}
           </strong>
-
-          <span className="stat-detail">
-            Small + large
-          </span>
-
+          <span className="stat-detail">Small + large</span>
         </div>
-
       </div>
 
-
-      {/* ======================================================
-          ACTIVE RESPONSE CASES
-      ====================================================== */}
+      {/* ACTIVE RESPONSE CASES */}
 
       <div className="panel">
-
         <div className="panel-heading">
-
           <div>
+            <span className="eyebrow">ACTIVE RESPONSE CASES</span>
 
-            <span className="eyebrow">
-              ACTIVE RESPONSE CASES
-            </span>
-
-            <h3>
-              Accepted requests
-            </h3>
+            <h3>Accepted requests</h3>
 
             <p>
-              Track every case your hospital has accepted
-              until the ambulance arrives and the incident
-              is resolved.
+              Track every case your hospital has accepted until
+              the ambulance arrives and the incident is resolved.
             </p>
-
           </div>
-
         </div>
 
-
         {activeCases.length === 0 ? (
-
           <div className="empty-state">
-
-            <strong>
-              No active response cases
-            </strong>
-
+            <strong>No active response cases</strong>
             <span>
               Accepted emergency requests will appear here.
             </span>
-
           </div>
-
         ) : (
-
           <div
             style={{
-              display:
-                "flex",
-              flexDirection:
-                "column",
-              gap:
-                "14px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 14,
             }}
           >
-
-            {activeCases.map(
-              (
-                incident
-              ) => (
+            {activeCases.map((incident) => (
+              <div
+                key={incident.incident_id}
+                style={{
+                  border: "1px solid #e2e8f0",
+                  borderRadius: 14,
+                  padding: 18,
+                  background: "#ffffff",
+                }}
+              >
+                {/* CASE HEADER */}
 
                 <div
-                  key={
-                    incident.incident_id
-                  }
-
                   style={{
-                    border:
-                      "1px solid #e2e8f0",
-                    borderRadius:
-                      "14px",
-                    padding:
-                      "18px",
-                    background:
-                      "#ffffff",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: 16,
+                    flexWrap: "wrap",
                   }}
                 >
+                  <div>
+                    <span className="alert-label">
+                      ACCEPTED CASE
+                    </span>
 
-                  {/* ------------------------------------------
-                      CASE HEADER
-                  ------------------------------------------ */}
+                    <h3 style={{ margin: "5px 0 4px" }}>
+                      {incident.incident_id}
+                    </h3>
 
-                  <div
-                    style={{
-                      display:
-                        "flex",
-                      justifyContent:
-                        "space-between",
-                      alignItems:
-                        "center",
-                      gap:
-                        "16px",
-                      flexWrap:
-                        "wrap",
-                    }}
-                  >
+                    <p style={{ margin: 0 }}>
+                      Accepted{" "}
+                      {incident.accepted_at
+                        ? formatDate(incident.accepted_at)
+                        : "recently"}
+                    </p>
+                  </div>
 
-                    <div>
-
-                      <span
-                        className="alert-label"
-                      >
-                        ACCEPTED CASE
-                      </span>
-
-                      <h3
-                        style={{
-                          margin:
-                            "5px 0 4px",
-                        }}
-                      >
-                        {
-                          incident.incident_id
-                        }
-                      </h3>
-
-                      <p
-                        style={{
-                          margin:
-                            0,
-                        }}
-                      >
-                        Accepted{" "}
-                        {incident.accepted_at
-                          ? formatDate(
-                              incident.accepted_at
-                            )
-                          : "recently"}
-                      </p>
-
+                  <div style={{ textAlign: "right" }}>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: "#64748b",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.06em",
+                      }}
+                    >
+                      Current status
                     </div>
-
 
                     <div
                       style={{
-                        textAlign:
-                          "right",
+                        marginTop: 5,
+                        fontWeight: 800,
+                        color: "#111827",
                       }}
                     >
-
-                      <div
-                        style={{
-                          fontSize:
-                            "11px",
-                          fontWeight:
-                            700,
-                          color:
-                            "#64748b",
-                          textTransform:
-                            "uppercase",
-                          letterSpacing:
-                            "0.06em",
-                        }}
-                      >
-                        Current status
-                      </div>
-
-                      <div
-                        style={{
-                          marginTop:
-                            "5px",
-                          fontWeight:
-                            800,
-                          color:
-                            "#111827",
-                        }}
-                      >
-                        {
-                          statusLabel(
-                            incident.status
-                          )
-                        }
-                      </div>
-
+                      {statusLabel(incident.status)}
                     </div>
-
                   </div>
-
-
-                  {/* ------------------------------------------
-                      METRICS
-                  ------------------------------------------ */}
-
-                  <div
-                    className="alert-metrics"
-                    style={{
-                      marginTop:
-                        "16px",
-                    }}
-                  >
-
-                    <div>
-
-                      <span>
-                        Confidence
-                      </span>
-
-                      <strong>
-                        {formatConfidence(
-                          incident.confidence
-                        )}
-                      </strong>
-
-                    </div>
-
-
-                    <div>
-
-                      <span>
-                        Severity
-                      </span>
-
-                      <strong>
-                        {
-                          incident.severity
-                            ?.level ||
-                          "UNKNOWN"
-                        }
-                      </strong>
-
-                    </div>
-
-
-                    <div>
-
-                      <span>
-                        Camera
-                      </span>
-
-                      <strong>
-                        {
-                          incident.camera_id ||
-                          "—"
-                        }
-                      </strong>
-
-                    </div>
-
-
-                    <div>
-
-                      <span>
-                        Ambulance
-                      </span>
-
-                      <strong>
-                        {
-                          incident.ambulance_type ||
-                          "Not dispatched"
-                        }
-                      </strong>
-
-                    </div>
-
-                  </div>
-
-
-                  {/* ------------------------------------------
-                      TRACKING TIMELINE
-                  ------------------------------------------ */}
-
-                  <CaseTracking
-                    status={
-                      incident.status ||
-                      "RESPONSE_ACCEPTED"
-                    }
-                  />
-
-
-                  {/* ------------------------------------------
-                      ACTIONS
-                  ------------------------------------------ */}
-
-                  <div
-                    className="button-row"
-                    style={{
-                      marginTop:
-                        "20px",
-                    }}
-                  >
-
-                    <Link
-                      className="button primary"
-                      to={`/hospital/incidents/${encodeURIComponent(
-                        incident.incident_id
-                      )}`}
-                    >
-                      TRACK CASE
-                    </Link>
-
-                  </div>
-
                 </div>
 
-              )
-            )}
+                {/* METRICS */}
 
-          </div>
+                <div
+                  className="alert-metrics"
+                  style={{ marginTop: 16 }}
+                >
+                  <div>
+                    <span>Confidence</span>
+                    <strong>
+                      {formatConfidence(incident.confidence)}
+                    </strong>
+                  </div>
 
-        )}
+                  <div>
+                    <span>Severity</span>
+                    <strong>
+                      {incident.severity?.level || "UNKNOWN"}
+                    </strong>
+                  </div>
 
-      </div>
+                  <div>
+                    <span>Camera</span>
+                    <strong>{incident.camera_id || "—"}</strong>
+                  </div>
 
-
-      {/* ======================================================
-          EMERGENCY MAP
-      ====================================================== */}
-
-      <div className="panel">
-
-        <div className="panel-heading">
-
-          <div>
-
-            <span className="eyebrow">
-              EMERGENCY LOCATION
-            </span>
-
-            <h3>
-              Accident and hospital network
-            </h3>
-
-            <p>
-
-              {recommendedHospital
-
-                ? `Nearest available hospital: ${
-                    recommendedHospital.name
-                  } (${recommendedHospital.distance.toFixed(
-                    2
-                  )} km)`
-
-                : "Hospital locations are shown when coordinates are available."}
-
-            </p>
-
-          </div>
-
-        </div>
-
-
-        <MapView
-          incidents={
-            alerts
-          }
-
-          hospitals={
-            availableHospitals
-          }
-
-          activeIncident={
-            activeIncident
-          }
-
-          recommendedHospital={
-            recommendedHospital
-          }
-
-          height={420}
-        />
-
-      </div>
-
-
-      {/* ======================================================
-          PENDING ALERT QUEUE
-      ====================================================== */}
-
-      <div className="alert-list">
-
-        {alerts.length === 0 ? (
-
-          <div className="panel empty-state large">
-
-            <strong>
-              No pending accident alerts
-            </strong>
-
-            <span>
-              New alerts will appear automatically.
-            </span>
-
-          </div>
-
-        ) : (
-
-          alerts.map(
-            (
-              incident
-            ) => (
-
-              <div
-                className="alert-card"
-                key={
-                  incident.incident_id
-                }
-              >
-
-                <div>
-
-                  <span className="alert-label">
-                    NEW ACCIDENT
-                  </span>
-
-                  <h3>
-                    {
-                      incident.incident_id
-                    }
-                  </h3>
-
-                  <p>
-                    {
-                      formatDate(
-                        incident.timestamp
-                      )
-                    }
-                  </p>
-
+                  <div>
+                    <span>Ambulance</span>
+                    <strong>
+                      {incident.ambulance_type || "Not dispatched"}
+                    </strong>
+                  </div>
                 </div>
 
+                {/* TRACKING TIMELINE */}
 
-                <div className="alert-metrics">
+                <CaseTracking
+                  status={incident.status || "RESPONSE_ACCEPTED"}
+                />
 
-                  <div>
+                {/* ACTIONS */}
 
-                    <span>
-                      Confidence
-                    </span>
-
-                    <strong>
-                      {
-                        formatConfidence(
-                          incident.confidence
-                        )
-                      }
-                    </strong>
-
-                  </div>
-
-
-                  <div>
-
-                    <span>
-                      Severity
-                    </span>
-
-                    <strong>
-                      {
-                        incident.severity
-                          ?.level ||
-                        "UNKNOWN"
-                      }
-                    </strong>
-
-                  </div>
-
-
-                  <div>
-
-                    <span>
-                      Camera
-                    </span>
-
-                    <strong>
-                      {
-                        incident.camera_id
-                      }
-                    </strong>
-
-                  </div>
-
-                </div>
-
-
-                <div className="button-row">
-
+                <div
+                  className="button-row"
+                  style={{ marginTop: 20 }}
+                >
                   <Link
-                    className="button secondary"
+                    className="button primary"
                     to={`/hospital/incidents/${encodeURIComponent(
                       incident.incident_id
                     )}`}
                   >
-                    Review
+                    TRACK CASE
                   </Link>
-
-
-                  <button
-                    className="button primary"
-                    onClick={() =>
-                      accept(
-                        incident.incident_id
-                      )
-                    }
-                  >
-                    ACCEPT FIRST
-                  </button>
-
-
-                  <button
-                    className="button danger"
-                    onClick={() =>
-                      reject(
-                        incident.incident_id
-                      )
-                    }
-                  >
-                    Reject
-                  </button>
-
                 </div>
-
               </div>
-
-            )
-          )
-
+            ))}
+          </div>
         )}
-
       </div>
 
+      {/* EMERGENCY MAP */}
+
+      <div className="panel">
+        <div className="panel-heading">
+          <div>
+            <span className="eyebrow">EMERGENCY LOCATION</span>
+
+            <h3>Accident and hospital network</h3>
+
+            <p>
+              {recommendedHospital
+                ? `Nearest available hospital: ${
+                    recommendedHospital.name || "Hospital"
+                  } (${recommendedHospital.distance.toFixed(2)} km straight-line distance)`
+                : "Incident and hospital locations appear when valid coordinates are available."}
+            </p>
+          </div>
+        </div>
+
+        <MapView
+          incidents={mapIncidents}
+          hospitals={availableHospitals}
+          activeIncident={activeIncident}
+          recommendedHospital={recommendedHospital}
+          height={420}
+        />
+      </div>
+
+      {/* PENDING ALERT QUEUE */}
+
+      <div className="alert-list">
+        {alerts.length === 0 ? (
+          <div className="panel empty-state large">
+            <strong>No pending accident alerts</strong>
+            <span>
+              New alerts will appear automatically.
+            </span>
+          </div>
+        ) : (
+          alerts.map((incident) => (
+            <div
+              className="alert-card"
+              key={incident.incident_id}
+            >
+              <div>
+                <span className="alert-label">NEW ACCIDENT</span>
+
+                <h3>{incident.incident_id}</h3>
+
+                <p>{formatDate(incident.timestamp)}</p>
+              </div>
+
+              <div className="alert-metrics">
+                <div>
+                  <span>Confidence</span>
+                  <strong>
+                    {formatConfidence(incident.confidence)}
+                  </strong>
+                </div>
+
+                <div>
+                  <span>Severity</span>
+                  <strong>
+                    {incident.severity?.level || "UNKNOWN"}
+                  </strong>
+                </div>
+
+                <div>
+                  <span>Camera</span>
+                  <strong>{incident.camera_id || "—"}</strong>
+                </div>
+              </div>
+
+              <div className="button-row">
+                <Link
+                  className="button secondary"
+                  to={`/hospital/incidents/${encodeURIComponent(
+                    incident.incident_id
+                  )}`}
+                >
+                  Review
+                </Link>
+
+                <button
+                  type="button"
+                  className="button primary"
+                  onClick={() => accept(incident.incident_id)}
+                >
+                  ACCEPT FIRST
+                </button>
+
+                <button
+                  type="button"
+                  className="button danger"
+                  onClick={() => reject(incident.incident_id)}
+                >
+                  Reject
+                </button>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
     </section>
   );
 }

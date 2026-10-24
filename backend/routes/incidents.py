@@ -86,6 +86,43 @@ def hospital_pending():
         ]
     ), 200
 
+# ============================================================
+# HOSPITAL: INCIDENTS FOR THE MAP
+# ============================================================
+
+@incidents_bp.get("/hospital/map-incidents")
+@require_login("hospital")
+def hospital_map_incidents():
+    hospital_id = current_hospital_id()
+
+    query = {
+        "$or": [
+            {
+                "status": "PENDING",
+                "dispatch_exhausted": {"$ne": True},
+                "$or": [
+                    {"eligible_hospitals": {"$exists": False}},
+                    {"eligible_hospitals": {"$size": 0}},
+                    {"eligible_hospitals": hospital_id},
+                ],
+            },
+            {"hospital_id": hospital_id},
+            {"dispatch_hospital_id": hospital_id},
+        ]
+    }
+
+    incidents = (
+        incidents_collection()
+        .find(query)
+        .sort("timestamp", -1)
+        .limit(500)
+    )
+
+    return jsonify([
+        serialize_document(incident)
+        for incident in incidents
+    ]), 200
+
 
 # ============================================================
 # HOSPITAL: HISTORY

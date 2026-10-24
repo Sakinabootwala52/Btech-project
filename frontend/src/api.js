@@ -210,6 +210,8 @@ export const api = {
 
 
   incidents: {
+mapIncidents: () =>
+  request("/incidents/hospital/map-incidents"),
 
     list: () =>
       request(

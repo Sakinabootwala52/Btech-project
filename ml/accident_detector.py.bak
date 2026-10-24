@@ -1,0 +1,317 @@
+
+# ml/accident_detector.py
+
+from collections import defaultdict, deque
+from itertools import combinations
+import math
+import time
+
+
+class AccidentDetector:
+    """
+    Heuristic accident detector using:
+      - rapid vehicle speed reduction
+      - close vehicle interactions
+      - abnormal trajectory changes
+      - persistent abnormal motion
+
+    IMPORTANT:
+    This is a heuristic, not a validated crash classifier.
+    Bounding-box overlap and pixel motion are not physical distance
+    or real-world speed measurements.
+    """
+
+    def __init__(
+        self,
+        proximity_threshold=0.18,
+        speed_drop_threshold=0.55,
+        abnormal_frames_required=3,
+        cooldown_seconds=5.0,
+    ):
+        self.proximity_threshold = proximity_threshold
+        self.speed_drop_threshold = speed_drop_threshold
+        self.abnormal_frames_required = abnormal_frames_required
+        self.cooldown_seconds = cooldown_seconds
+
+        self.track_history = defaultdict(
+            lambda: deque(maxlen=8)
+        )
+        self.abnormal_counts = defaultdict(int)
+        self.last_event_time = -float("inf")
+
+    @staticmethod
+    def _number(value, default=0.0):
+        try:
+            result = float(value)
+            if math.isfinite(result):
+                return result
+        except (TypeError, ValueError):
+            pass
+        return default
+
+    @staticmethod
+    def _box(detection):
+        """
+        Supports:
+          {"bbox": [x1, y1, x2, y2]}
+          {"box": [x1, y1, x2, y2]}
+          {"xyxy": [x1, y1, x2, y2]}
+        """
+        if not isinstance(detection, dict):
+            return None
+
+        for key in ("bbox", "box", "xyxy"):
+            value = detection.get(key)
+
+            if value is None:
+                continue
+
+            try:
+                coords = list(value)
+                if len(coords) >= 4:
+                    x1, y1, x2, y2 = map(float, coords[:4])
+                    if x2 > x1 and y2 > y1:
+                        return x1, y1, x2, y2
+            except (TypeError, ValueError):
+                continue
+
+        return None
+
+    @staticmethod
+    def _center(box):
+        x1, y1, x2, y2 = box
+        return ((x1 + x2) / 2, (y1 + y2) / 2)
+
+    @staticmethod
+    def _iou(a, b):
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+
+        ix1 = max(ax1, bx1)
+        iy1 = max(ay1, by1)
+        ix2 = min(ax2, bx2)
+        iy2 = min(ay2, by2)
+
+        intersection = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+
+        area_a = (ax2 - ax1) * (ay2 - ay1)
+        area_b = (bx2 - bx1) * (by2 - by1)
+
+        union = area_a + area_b - intersection
+        return intersection / union if union > 0 else 0.0
+
+    def _normalize_tracks(self, detections):
+        tracks = []
+
+        for index, detection in enumerate(detections or []):
+            box = self._box(detection)
+            if box is None:
+                continue
+
+            track_id = index
+
+            if isinstance(detection, dict):
+                track_id = detection.get(
+                    "track_id",
+                    detection.get("id", index),
+                )
+
+            center = self._center(box)
+
+            tracks.append({
+                "id": str(track_id),
+                "box": box,
+                "center": center,
+            })
+
+        return tracks
+
+    def score(self, detections, features=None, history=None):
+        """
+        Returns the event fields expected by the stream processor.
+
+        `features` and `history` are accepted to preserve the existing
+        calling convention. This detector independently extracts basic
+        image-space movement from stable detection IDs.
+        """
+        now = time.monotonic()
+        tracks = self._normalize_tracks(detections)
+
+        evidence_flags = []
+        speed_before_values = []
+        speed_after_values = []
+        speed_anomaly = False
+        trajectory_anomaly = False
+        collision_proximity = False
+        persistent_abnormal_motion = False
+
+        for track in tracks:
+            track_id = track["id"]
+            x, y = track["center"]
+            box = track["box"]
+
+            previous = self.track_history[track_id]
+
+            if previous:
+                old_x, old_y, old_time, old_box = previous[-1]
+                dt = max(now - old_time, 0.001)
+
+                current_speed = math.hypot(
+                    x - old_x,
+                    y - old_y,
+                ) / dt
+
+                previous_speeds = [
+                    item[4]
+                    for item in list(previous)[1:]
+                    if len(item) > 4
+                ]
+
+                if previous_speeds:
+                    baseline = sum(previous_speeds) / len(previous_speeds)
+                    if baseline > 1.0:
+                        speed_before_values.append(baseline)
+                        speed_after_values.append(current_speed)
+
+                        if current_speed < baseline * (
+                            1.0 - self.speed_drop_threshold
+                        ):
+                            speed_anomaly = True
+                            evidence_flags.append("rapid_speed_reduction")
+
+                if len(previous) >= 2:
+                    px, py, pt, _ = previous[-2][:4]
+                    old_dx = old_x - px
+                    old_dy = old_y - py
+                    new_dx = x - old_x
+                    new_dy = y - old_y
+
+                    old_magnitude = math.hypot(old_dx, old_dy)
+                    new_magnitude = math.hypot(new_dx, new_dy)
+
+                    if old_magnitude > 2 and new_magnitude > 2:
+                        cosine = (
+                            old_dx * new_dx + old_dy * new_dy
+                        ) / (old_magnitude * new_magnitude)
+
+                        if cosine < -0.5:
+                            trajectory_anomaly = True
+                            evidence_flags.append("trajectory_reversal")
+
+            previous.append((x, y, now, box, 0.0))
+
+        # Update estimated speed history after processing each track.
+        for track in tracks:
+            entries = self.track_history[track["id"]]
+            if len(entries) >= 2:
+                a = entries[-2]
+                b = entries[-1]
+                dt = max(b[2] - a[2], 0.001)
+                speed = math.hypot(
+                    b[0] - a[0],
+                    b[1] - a[1],
+                ) / dt
+
+                entries[-1] = (
+                    b[0], b[1], b[2], b[3], speed
+                )
+
+        # Overlap/proximity is a supporting clue, not proof of a crash.
+        for first, second in combinations(tracks, 2):
+            box_a = first["box"]
+            box_b = second["box"]
+
+            iou = self._iou(box_a, box_b)
+
+            if iou >= self.proximity_threshold:
+                collision_proximity = True
+                evidence_flags.append("vehicle_box_overlap")
+
+        abnormal = (
+            speed_anomaly
+            or trajectory_anomaly
+            or collision_proximity
+        )
+
+        for track in tracks:
+            track_id = track["id"]
+
+            if abnormal:
+                self.abnormal_counts[track_id] += 1
+            else:
+                self.abnormal_counts[track_id] = max(
+                    0,
+                    self.abnormal_counts[track_id] - 1,
+                )
+
+            if (
+                self.abnormal_counts[track_id]
+                >= self.abnormal_frames_required
+            ):
+                persistent_abnormal_motion = True
+
+        # Require more than simple proximity for a confirmed heuristic
+        # event, except a sustained severe speed/trajectory abnormality.
+        corroborated = (
+            (speed_anomaly and collision_proximity)
+            or (trajectory_anomaly and collision_proximity)
+            or (
+                persistent_abnormal_motion
+                and (speed_anomaly or trajectory_anomaly)
+            )
+        )
+
+        accident_detected = (
+            corroborated
+            and now - self.last_event_time >= self.cooldown_seconds
+        )
+
+        if accident_detected:
+            self.last_event_time = now
+
+        indicators = sum([
+            speed_anomaly,
+            trajectory_anomaly,
+            collision_proximity,
+            persistent_abnormal_motion,
+        ])
+
+        confidence = min(
+            0.95,
+            0.20 * indicators + (0.15 if corroborated else 0.0),
+        )
+
+        severity_score = min(100, indicators * 20)
+
+        if severity_score >= 60:
+            severity_level = "high"
+        elif severity_score >= 40:
+            severity_level = "medium"
+        elif severity_score > 0:
+            severity_level = "low"
+        else:
+            severity_level = "unknown"
+
+        return {
+            "accident_detected": bool(accident_detected),
+            "confidence": round(confidence, 3),
+            "speed_before": (
+                round(sum(speed_before_values) / len(speed_before_values), 3)
+                if speed_before_values else 0.0
+            ),
+            "speed_after": (
+                round(sum(speed_after_values) / len(speed_after_values), 3)
+                if speed_after_values else 0.0
+            ),
+            "speed_anomaly": bool(speed_anomaly),
+            "trajectory_anomaly": bool(trajectory_anomaly),
+            "collision_proximity": bool(collision_proximity),
+            "persistent_abnormal_motion": bool(
+                persistent_abnormal_motion
+            ),
+            "severity": {
+                "level": severity_level,
+                "score": severity_score,
+                "basis": sorted(set(evidence_flags)),
+            },
+        }

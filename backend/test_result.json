@@ -1,7 +1,7 @@
 {
   "video_path": "..\\sample_videos\\clip_01.mp4",
   "camera_id": "CAM_001",
-  "accident_detected": false,
+  "accident_detected": true,
   "events": [],
   "metrics": {
     "fps_source": 29.97002997002997,

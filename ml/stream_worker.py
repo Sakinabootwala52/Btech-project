@@ -1,57 +1,52 @@
-from pathlib import Path
+
+# ml/stream_processor.py
+
 import argparse
 import json
+import os
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import cv2
 
 from accident_detector import AccidentDetector
 from buffer import RollingVideoBuffer
-from config import (
-    BUFFER_SECONDS,
-    CLIP_DIR,
-    CLIP_SECONDS,
-)
+from config import BUFFER_SECONDS, CLIP_DIR, CLIP_SECONDS
 from detector import VehicleDetector
 from tracker import TrackHistory
 
 
-# ============================================================
-# STATUS WRITER
-# ============================================================
+def write_status(status_path, status_data):
+    """Atomically write status JSON, retrying transient Windows locks."""
+    status_path = Path(status_path)
+    status_path.parent.mkdir(parents=True, exist_ok=True)
 
-def write_status(
-    path,
-    status,
-):
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
+    temp_path = status_path.with_name(
+        f"{status_path.stem}.{os.getpid()}.{time.time_ns()}.tmp"
     )
 
-    temp_path = (
-        path.with_suffix(".tmp")
-    )
+    try:
+        with temp_path.open("w", encoding="utf-8") as file:
+            json.dump(status_data, file, ensure_ascii=False, indent=2)
+            file.flush()
+            os.fsync(file.fileno())
 
-    temp_path.write_text(
-        json.dumps(
-            status,
-            indent=2,
-            default=str,
-        ),
-        encoding="utf-8",
-    )
+        for attempt in range(5):
+            try:
+                os.replace(str(temp_path), str(status_path))
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.15 * (attempt + 1))
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
-    temp_path.replace(
-        path
-    )
-
-
-# ============================================================
-# BACKEND CALLBACK
-# ============================================================
 
 def notify_backend(
     callback_url,
@@ -61,83 +56,35 @@ def notify_backend(
     event,
     incident_id=None,
 ):
-    """
-    Send an accident event directly to Flask.
-
-    This is the important latency optimization:
-
-        accident detected
-              ↓
-        HTTP callback
-              ↓
-        Flask
-              ↓
-        MongoDB
-
-    We intentionally use Python's standard library so the
-    ML virtual environment does not need requests/axios/etc.
-    """
-
     if not callback_url:
         return None
 
     payload = {
-        "stream_id":
-            stream_id,
-        "token":
-            callback_token,
-        "event_type":
-            event_type,
-        "event":
-            event,
+        "stream_id": stream_id,
+        "token": callback_token,
+        "event_type": event_type,
+        "event": event,
     }
 
     if incident_id:
-        payload["incident_id"] = (
-            incident_id
-        )
-
-    body = json.dumps(
-        payload,
-        default=str,
-    ).encode(
-        "utf-8"
-    )
+        payload["incident_id"] = incident_id
 
     request = urllib.request.Request(
         callback_url,
-        data=body,
-        headers={
-            "Content-Type":
-                "application/json",
-        },
+        data=json.dumps(payload, default=str).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
         method="POST",
     )
 
     try:
-        with urllib.request.urlopen(
-            request,
-            timeout=2,
-        ) as response:
-
-            raw = (
-                response.read()
-                .decode("utf-8")
-            )
-
-            if not raw:
-                return None
-
-            result = json.loads(
-                raw
-            )
-
+        with urllib.request.urlopen(request, timeout=2) as response:
+            raw = response.read().decode("utf-8")
+            result = json.loads(raw) if raw else {}
             print(
-                f"BACKEND CALLBACK | "
-                f"type={event_type} | "
-                f"response={result}"
+                f"BACKEND CALLBACK | type={event_type} | "
+                f"response={result}",
+                flush=True,
             )
-
             return result
 
     except (
@@ -146,33 +93,12 @@ def notify_backend(
         json.JSONDecodeError,
         OSError,
     ) as exc:
-
         print(
-            "\n========== BACKEND CALLBACK ERROR =========="
+            f"BACKEND CALLBACK ERROR | type={event_type} | {exc}",
+            flush=True,
         )
-
-        print(
-            f"Type: {event_type}"
-        )
-
-        print(
-            f"Error: {exc}"
-        )
-
-        print(
-            "The stream will continue running."
-        )
-
-        print(
-            "=============================================\n"
-        )
-
         return None
 
-
-# ============================================================
-# VIDEO CLIP
-# ============================================================
 
 def save_event_clip(
     buffer_frames,
@@ -183,87 +109,61 @@ def save_event_clip(
     height,
     camera_id,
 ):
-    CLIP_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    CLIP_DIR.mkdir(parents=True, exist_ok=True)
 
-    all_frames = (
-        buffer_frames
-        + post_frames
-    )
-
-    unique = {
+    unique_frames = {
         item.frame_index: item
-        for item in all_frames
+        for item in buffer_frames + post_frames
     }
 
     selected = sorted(
-        unique.values(),
-        key=lambda item:
-            item.frame_index,
+        unique_frames.values(),
+        key=lambda item: item.frame_index,
     )
 
-    start = (
-        event_time
-        - CLIP_SECONDS / 2
-    )
-
-    end = (
-        event_time
-        + CLIP_SECONDS / 2
-    )
+    start = event_time - CLIP_SECONDS / 2
+    end = event_time + CLIP_SECONDS / 2
 
     selected = [
-        item
-        for item in selected
-        if (
-            start
-            <= item.timestamp_seconds
-            <= end
-        )
+        item for item in selected
+        if start <= item.timestamp_seconds <= end
     ]
 
     if not selected:
         return None
 
-    clip_path = (
-        CLIP_DIR
-        / (
-            f"{camera_id}_"
-            f"stream_"
-            f"{int(event_time * 1000)}.mp4"
-        )
+    safe_camera_id = "".join(
+        c if c.isalnum() or c in "-_" else "_"
+        for c in camera_id
+    )
+
+    clip_path = CLIP_DIR / (
+        f"{safe_camera_id}_stream_{int(event_time * 1000)}.mp4"
     )
 
     writer = cv2.VideoWriter(
         str(clip_path),
-        cv2.VideoWriter_fourcc(
-            *"mp4v"
-        ),
+        cv2.VideoWriter_fourcc(*"mp4v"),
         fps,
-        (
-            width,
-            height,
-        ),
+        (width, height),
     )
 
     if not writer.isOpened():
+        writer.release()
+        print(f"CLIP ERROR | Cannot open writer for {clip_path}")
         return None
 
-    for item in selected:
-        writer.write(
-            item.frame
-        )
+    try:
+        for item in selected:
+            writer.write(item.frame)
+    finally:
+        writer.release()
 
-    writer.release()
+    if not clip_path.exists() or clip_path.stat().st_size == 0:
+        return None
 
     return clip_path
 
-
-# ============================================================
-# EVENT BUILDER
-# ============================================================
 
 def build_event(
     pending_event,
@@ -273,13 +173,8 @@ def build_event(
     height,
     camera_id,
 ):
-    event_time = (
-        pending_event["event_time"]
-    )
-
-    evidence = (
-        pending_event["evidence"]
-    )
+    event_time = pending_event["event_time"]
+    evidence = pending_event["evidence"]
 
     clip_path = save_event_clip(
         pending_event["frames"],
@@ -292,87 +187,26 @@ def build_event(
     )
 
     return {
-        "accident_detected":
-            True,
-
-        "confidence":
-            evidence.get(
-                "confidence",
-                0.0,
-            ),
-
-        "camera_id":
-            camera_id,
-
-        "timestamp_seconds":
-            event_time,
-
-        "frame_index":
-            int(
-                event_time * fps
-            ),
-
-        "speed_before":
-            evidence.get(
-                "speed_before",
-                0.0,
-            ),
-
-        "speed_after":
-            evidence.get(
-                "speed_after",
-                0.0,
-            ),
-
-        "speed_anomaly":
-            evidence.get(
-                "speed_anomaly",
-                False,
-            ),
-
-        "trajectory_anomaly":
-            evidence.get(
-                "trajectory_anomaly",
-                False,
-            ),
-
-        "collision_proximity":
-            evidence.get(
-                "collision_proximity",
-                False,
-            ),
-
-        "persistent_abnormal_motion":
-            evidence.get(
-                "persistent_abnormal_motion",
-                False,
-            ),
-
-        "severity":
-            evidence.get(
-                "severity",
-                {
-                    "level":
-                        "unknown",
-                    "score":
-                        0,
-                    "basis":
-                        [],
-                },
-            ),
-
-        "video_clip":
-            (
-                str(clip_path)
-                if clip_path
-                else None
-            ),
+        "accident_detected": True,
+        "confidence": evidence.get("confidence", 0.0),
+        "camera_id": camera_id,
+        "timestamp_seconds": event_time,
+        "frame_index": int(event_time * fps),
+        "speed_before": evidence.get("speed_before", 0.0),
+        "speed_after": evidence.get("speed_after", 0.0),
+        "speed_anomaly": evidence.get("speed_anomaly", False),
+        "trajectory_anomaly": evidence.get("trajectory_anomaly", False),
+        "collision_proximity": evidence.get("collision_proximity", False),
+        "persistent_abnormal_motion": evidence.get(
+            "persistent_abnormal_motion", False
+        ),
+        "severity": evidence.get(
+            "severity",
+            {"level": "unknown", "score": 0, "basis": []},
+        ),
+        "video_clip": str(clip_path) if clip_path else None,
     }
 
-
-# ============================================================
-# STREAM PROCESSING
-# ============================================================
 
 def process_stream(
     source,
@@ -383,403 +217,206 @@ def process_stream(
     callback_token=None,
     stream_id=None,
 ):
-    cap = cv2.VideoCapture(
-        source
-    )
+    cap = cv2.VideoCapture(source)
 
     if not cap.isOpened():
-        raise RuntimeError(
-            f"Could not open stream source: {source}"
-        )
+        cap.release()
+        raise RuntimeError(f"Could not open stream source: {source}")
 
-    fps = cap.get(
-        cv2.CAP_PROP_FPS
-    )
-
-    if (
-        not fps
-        or fps <= 0
-    ):
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if not fps or fps <= 0:
         fps = 25.0
 
-    width = int(
-        cap.get(
-            cv2.CAP_PROP_FRAME_WIDTH
-        )
-    )
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    height = int(
-        cap.get(
-            cv2.CAP_PROP_FRAME_HEIGHT
-        )
-    )
+    if width <= 0 or height <= 0:
+        cap.release()
+        raise RuntimeError("Stream reported invalid frame dimensions.")
 
-    buffer = RollingVideoBuffer(
-        BUFFER_SECONDS,
-        fps,
-    )
+    inference_stride = max(1, int(inference_stride))
 
+    buffer = RollingVideoBuffer(BUFFER_SECONDS, fps)
     history = TrackHistory()
-
     detector = VehicleDetector()
-
-    accident_detector = (
-        AccidentDetector()
-    )
+    accident_detector = AccidentDetector()
 
     frame_index = 0
-
     last_detections = []
-
     last_evidence = {
-        "accident_detected":
-            False,
-        "confidence":
-            0.0,
-        "severity": {
-            "level":
-                "none",
-            "score":
-                0,
-            "basis":
-                [],
-        },
+        "accident_detected": False,
+        "confidence": 0.0,
+        "speed_anomaly": False,
+        "trajectory_anomaly": False,
+        "collision_proximity": False,
+        "persistent_abnormal_motion": False,
+        "severity": {"level": "unknown", "score": 0, "basis": []},
     }
 
     pending_event = None
-
     post_event_frames = []
-
     cooldown_until = -1.0
-
     events = []
-
     incident_id = None
-
     started_at = time.time()
+    last_status_write = 0.0
+    status_interval = 0.5
 
-    # ========================================================
-    # INITIAL STATUS
-    # ========================================================
+    def current_status(status):
+        return {
+            "status": status,
+            "camera_id": camera_id,
+            "stream_id": stream_id,
+            "source": str(source),
+            "frames_processed": frame_index,
+            "last_timestamp": frame_index / fps,
+            "accident_detected": (
+                bool(events)
+                or pending_event is not None
+                or bool(last_evidence.get("accident_detected"))
+            ),
+            "last_detection": last_evidence,
+            "events": events,
+            "incident_id": incident_id,
+            "elapsed_seconds": time.time() - started_at,
+        }
 
-    write_status(
-        status_path,
-        {
-            "status":
-                "running",
+    def finalize_event(event, callback_type="finalized"):
+        nonlocal incident_id
 
-            "camera_id":
-                camera_id,
+        events.append(event)
 
-            "stream_id":
-                stream_id,
+        print(
+            f"EVENT SAVED | clip={event.get('video_clip')} | "
+            f"confidence={event.get('confidence')}",
+            flush=True,
+        )
 
-            "source":
-                str(source),
+        result = notify_backend(
+            callback_url=callback_url,
+            callback_token=callback_token,
+            stream_id=stream_id,
+            event_type=callback_type,
+            event=event,
+            incident_id=incident_id,
+        )
 
-            "frames_processed":
-                0,
-
-            "last_timestamp":
-                0,
-
-            "accident_detected":
-                False,
-
-            "last_detection":
-                last_evidence,
-
-            "events":
-                [],
-
-            "incident_id":
-                None,
-
-            "elapsed_seconds":
-                0,
-        },
-    )
+        if result and result.get("incident_id"):
+            incident_id = result["incident_id"]
 
     try:
+        write_status(status_path, current_status("running"))
+
         while True:
             ok, frame = cap.read()
-
             if not ok:
                 break
 
-            timestamp = (
-                frame_index / fps
-            )
+            timestamp = frame_index / fps
+            buffer.add(frame_index, timestamp, frame)
 
-            buffer.add(
-                frame_index,
-                timestamp,
-                frame,
-            )
-
-            should_infer = (
-                frame_index
-                % inference_stride
-                == 0
-            )
-
-            # =================================================
-            # ML INFERENCE
-            # =================================================
+            should_infer = frame_index % inference_stride == 0
 
             if should_infer:
-                detections = (
-                    detector.track_frame(
-                        frame
-                    )
+                detections = detector.track_frame(frame)
+
+                # Keep the existing TrackHistory API.
+                inference_fps = fps / inference_stride
+                features = history.update(detections, inference_fps)
+
+                evidence = accident_detector.score(
+                    detections,
+                    features,
+                    history,
                 )
 
-                inference_fps = (
-                    fps
-                    / inference_stride
-                )
+                last_detections = detections
+                last_evidence = evidence
 
-                features = (
-                    history.update(
-                        detections,
-                        inference_fps,
-                    )
-                )
-
-                evidence = (
-                    accident_detector.score(
-                        detections,
-                        features,
-                        history,
-                    )
-                )
-
-                last_detections = (
-                    detections
-                )
-
-                last_evidence = (
-                    evidence
+                print(
+                    f"FRAME={frame_index} "
+                    f"DETECTIONS={len(detections)} "
+                    f"TRACKS={len(features)} "
+                    f"ACCIDENT={evidence.get('accident_detected')} "
+                    f"CONFIDENCE={evidence.get('confidence')} "
+                    f"SPEED_ANOMALY={evidence.get('speed_anomaly')} "
+                    f"DIRECTION_ANOMALY={evidence.get('trajectory_anomaly')} "
+                    f"INTERACTION={evidence.get('collision_proximity')} "
+                    f"SEVERITY={evidence.get('severity')}",
+                    flush=True,
                 )
 
             else:
-                detections = (
-                    last_detections
-                )
-
-                evidence = (
-                    last_evidence
-                )
-
-            # =================================================
-            # START ACCIDENT
-            # =================================================
+                detections = last_detections
+                evidence = last_evidence
 
             if (
                 should_infer
-                and evidence[
-                    "accident_detected"
-                ]
-                and timestamp
-                >= cooldown_until
+                and evidence.get("accident_detected", False)
+                and timestamp >= cooldown_until
                 and pending_event is None
             ):
                 pending_event = {
-                    "event_time":
-                        timestamp,
-
-                    "evidence":
-                        evidence,
-
-                    "frames":
-                        buffer.recent(),
+                    "event_time": timestamp,
+                    "evidence": evidence,
+                    "frames": buffer.recent(),
                 }
-
                 post_event_frames = []
 
-                print(
-                    f"\nACCIDENT DETECTED | "
-                    f"camera={camera_id} | "
-                    f"time={timestamp:.2f}s | "
-                    f"confidence="
-                    f"{evidence['confidence']:.2f}"
-                )
-
-                # ---------------------------------------------
-                # IMMEDIATE BACKEND INCIDENT
-                # ---------------------------------------------
-                #
-                # We do NOT wait for the evidence clip.
-                #
-                # This is what removes the major delay.
-                #
-
                 immediate_event = {
-                    "accident_detected":
-                        True,
-
-                    "confidence":
-                        evidence.get(
-                            "confidence",
-                            0.0,
-                        ),
-
-                    "camera_id":
-                        camera_id,
-
-                    "timestamp_seconds":
-                        timestamp,
-
-                    "frame_index":
-                        frame_index,
-
-                    "speed_before":
-                        evidence.get(
-                            "speed_before",
-                            0.0,
-                        ),
-
-                    "speed_after":
-                        evidence.get(
-                            "speed_after",
-                            0.0,
-                        ),
-
-                    "speed_anomaly":
-                        evidence.get(
-                            "speed_anomaly",
-                            False,
-                        ),
-
-                    "trajectory_anomaly":
-                        evidence.get(
-                            "trajectory_anomaly",
-                            False,
-                        ),
-
-                    "collision_proximity":
-                        evidence.get(
-                            "collision_proximity",
-                            False,
-                        ),
-
-                    "persistent_abnormal_motion":
-                        evidence.get(
-                            "persistent_abnormal_motion",
-                            False,
-                        ),
-
-                    "severity":
-                        evidence.get(
-                            "severity",
-                            {
-                                "level":
-                                    "unknown",
-                                "score":
-                                    0,
-                                "basis":
-                                    [],
-                            },
-                        ),
-
-                    "video_clip":
-                        None,
+                    "accident_detected": True,
+                    "confidence": evidence.get("confidence", 0.0),
+                    "camera_id": camera_id,
+                    "timestamp_seconds": timestamp,
+                    "frame_index": frame_index,
+                    "speed_before": evidence.get("speed_before", 0.0),
+                    "speed_after": evidence.get("speed_after", 0.0),
+                    "speed_anomaly": evidence.get("speed_anomaly", False),
+                    "trajectory_anomaly": evidence.get(
+                        "trajectory_anomaly", False
+                    ),
+                    "collision_proximity": evidence.get(
+                        "collision_proximity", False
+                    ),
+                    "persistent_abnormal_motion": evidence.get(
+                        "persistent_abnormal_motion", False
+                    ),
+                    "severity": evidence.get(
+                        "severity",
+                        {"level": "unknown", "score": 0, "basis": []},
+                    ),
+                    "video_clip": None,
                 }
 
-                callback_result = (
-                    notify_backend(
-                        callback_url=
-                            callback_url,
-
-                        callback_token=
-                            callback_token,
-
-                        stream_id=
-                            stream_id,
-
-                        event_type=
-                            "detected",
-
-                        event=
-                            immediate_event,
-                    )
+                result = notify_backend(
+                    callback_url=callback_url,
+                    callback_token=callback_token,
+                    stream_id=stream_id,
+                    event_type="detected",
+                    event=immediate_event,
                 )
 
-                if callback_result:
-                    incident_id = (
-                        callback_result.get(
-                            "incident_id"
-                        )
-                    )
+                if result and result.get("incident_id"):
+                    incident_id = result["incident_id"]
 
-                    print(
-                        "IMMEDIATE INCIDENT ID | "
-                        f"{incident_id}"
-                    )
-
-                # Immediately expose detection in status.
-                write_status(
-                    status_path,
-                    {
-                        "status":
-                            "running",
-
-                        "camera_id":
-                            camera_id,
-
-                        "stream_id":
-                            stream_id,
-
-                        "source":
-                            str(source),
-
-                        "frames_processed":
-                            frame_index,
-
-                        "last_timestamp":
-                            timestamp,
-
-                        "accident_detected":
-                            True,
-
-                        "last_detection":
-                            evidence,
-
-                        "events":
-                            events,
-
-                        "incident_id":
-                            incident_id,
-
-                        "elapsed_seconds":
-                            (
-                                time.time()
-                                - started_at
-                            ),
-                    },
-                )
-
-            # =================================================
-            # COLLECT POST-EVENT FRAMES
-            # =================================================
+                write_status(status_path, current_status("running"))
 
             if pending_event is not None:
                 recent = buffer.recent()
-
                 if recent:
-                    post_event_frames.append(
-                        recent[-1]
-                    )
+                    newest = recent[-1]
+                    if (
+                        not post_event_frames
+                        or newest.frame_index
+                        != post_event_frames[-1].frame_index
+                    ):
+                        post_event_frames.append(newest)
 
                 target_end = (
-                    pending_event[
-                        "event_time"
-                    ]
-                    + CLIP_SECONDS / 2
+                    pending_event["event_time"] + CLIP_SECONDS / 2
                 )
 
                 if timestamp >= target_end:
-
                     event = build_event(
                         pending_event,
                         post_event_frames,
@@ -789,303 +426,64 @@ def process_stream(
                         camera_id,
                     )
 
-                    events.append(
-                        event
-                    )
-
-                    print(
-                        "EVENT SAVED | "
-                        f"clip={event['video_clip']}"
-                    )
-
-                    # -----------------------------------------
-                    # FINALIZE INCIDENT
-                    # -----------------------------------------
-
-                    callback_result = (
-                        notify_backend(
-                            callback_url=
-                                callback_url,
-
-                            callback_token=
-                                callback_token,
-
-                            stream_id=
-                                stream_id,
-
-                            event_type=
-                                "finalized",
-
-                            event=
-                                event,
-
-                            incident_id=
-                                incident_id,
-                        )
-                    )
-
-                    if callback_result:
-
-                        returned_id = (
-                            callback_result.get(
-                                "incident_id"
-                            )
-                        )
-
-                        if returned_id:
-                            incident_id = (
-                                returned_id
-                            )
+                    finalize_event(event)
 
                     pending_event = None
-
                     post_event_frames = []
-
-                    cooldown_until = (
-                        timestamp
-                        + CLIP_SECONDS
-                    )
+                    cooldown_until = timestamp + CLIP_SECONDS
 
             frame_index += 1
 
-            write_status(
-                status_path,
-                {
-                    "status":
-                        "running",
+            if time.monotonic() - last_status_write >= status_interval:
+                write_status(status_path, current_status("running"))
+                last_status_write = time.monotonic()
 
-                    "camera_id":
-                        camera_id,
-
-                    "stream_id":
-                        stream_id,
-
-                    "source":
-                        str(source),
-
-                    "frames_processed":
-                        frame_index,
-
-                    "last_timestamp":
-                        timestamp,
-
-                    "accident_detected":
-                        (
-                            bool(events)
-                            or pending_event
-                            is not None
-                            or bool(
-                                last_evidence.get(
-                                    "accident_detected",
-                                    False,
-                                )
-                            )
-                        ),
-
-                    "last_detection":
-                        last_evidence,
-
-                    "events":
-                        events,
-
-                    "incident_id":
-                        incident_id,
-
-                    "elapsed_seconds":
-                        (
-                            time.time()
-                            - started_at
-                        ),
-                },
-            )
+    except Exception as exc:
+        print(f"STREAM ERROR | {type(exc).__name__}: {exc}", flush=True)
+        raise
 
     finally:
-
-        # =====================================================
-        # FINALIZE PENDING EVENT WHEN STREAM ENDS
-        # =====================================================
-
-        if pending_event is not None:
-
-            event = build_event(
-                pending_event,
-                post_event_frames,
-                fps,
-                width,
-                height,
-                camera_id,
-            )
-
-            events.append(
-                event
-            )
-
-            print(
-                "FINAL EVENT SAVED | "
-                f"clip={event['video_clip']}"
-            )
-
-            callback_result = (
-                notify_backend(
-                    callback_url=
-                        callback_url,
-
-                    callback_token=
-                        callback_token,
-
-                    stream_id=
-                        stream_id,
-
-                    event_type=
-                        "finalized",
-
-                    event=
-                        event,
-
-                    incident_id=
-                        incident_id,
-                )
-            )
-
-            if callback_result:
-                returned_id = (
-                    callback_result.get(
-                        "incident_id"
-                    )
-                )
-
-                if returned_id:
-                    incident_id = (
-                        returned_id
-                    )
-
-            pending_event = None
-
-            post_event_frames = []
-
-        cap.release()
-
-        write_status(
-            status_path,
-            {
-                "status":
-                    "completed",
-
-                "camera_id":
+        try:
+            if pending_event is not None:
+                event = build_event(
+                    pending_event,
+                    post_event_frames,
+                    fps,
+                    width,
+                    height,
                     camera_id,
+                )
+                finalize_event(event)
+        finally:
+            cap.release()
+            write_status(status_path, current_status("completed"))
 
-                "stream_id":
-                    stream_id,
-
-                "source":
-                    str(source),
-
-                "frames_processed":
-                    frame_index,
-
-                "last_timestamp":
-                    (
-                        frame_index / fps
-                        if fps
-                        else 0
-                    ),
-
-                "accident_detected":
-                    bool(events),
-
-                "last_detection":
-                    last_evidence,
-
-                "events":
-                    events,
-
-                "incident_id":
-                    incident_id,
-
-                "elapsed_seconds":
-                    (
-                        time.time()
-                        - started_at
-                    ),
-            },
-        )
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        "--source",
-        required=True,
-    )
-
-    parser.add_argument(
-        "--camera-id",
-        default="CAM_001",
-    )
-
-    parser.add_argument(
-        "--status-file",
-        required=True,
-    )
-
-    parser.add_argument(
-        "--inference-stride",
-        type=int,
-        default=2,
-    )
-
-    parser.add_argument(
-        "--callback-url",
-        default=None,
-    )
-
-    parser.add_argument(
-        "--callback-token",
-        default=None,
-    )
-
-    parser.add_argument(
-        "--stream-id",
-        default=None,
-    )
+    parser.add_argument("--source", required=True)
+    parser.add_argument("--camera-id", default="CAM_001")
+    parser.add_argument("--status-file", required=True)
+    parser.add_argument("--inference-stride", type=int, default=2)
+    parser.add_argument("--callback-url", default=None)
+    parser.add_argument("--callback-token", default=None)
+    parser.add_argument("--stream-id", default=None)
 
     args = parser.parse_args()
 
     source = args.source
-
     if source.isdigit():
         source = int(source)
 
     process_stream(
         source=source,
-
-        camera_id=
-            args.camera_id,
-
-        status_path=
-            Path(
-                args.status_file
-            ),
-
-        inference_stride=
-            max(
-                1,
-                args.inference_stride,
-            ),
-
-        callback_url=
-            args.callback_url,
-
-        callback_token=
-            args.callback_token,
-
-        stream_id=
-            args.stream_id,
+        camera_id=args.camera_id,
+        status_path=Path(args.status_file),
+        inference_stride=max(1, args.inference_stride),
+        callback_url=args.callback_url,
+        callback_token=args.callback_token,
+        stream_id=args.stream_id,
     )
 
 

@@ -1381,6 +1381,13 @@ export default function HospitalIncidentDetails() {
   // RECOMMENDED HOSPITAL
   // ==========================================================
 
+  // Hospital comparison returned by the backend
+  const hospitalComparison = Array.isArray(
+    incident?.hospital_comparison
+  )
+    ? incident.hospital_comparison
+    : [];
+
   const recommendedHospital =
     useMemo(() => {
 
@@ -1902,6 +1909,112 @@ export default function HospitalIncidentDetails() {
 
       </div>
 
+
+      {/* ======================================================
+          HOSPITAL COMPARISON
+      ====================================================== */}
+
+      <div
+        className="panel"
+        style={{ marginTop: "18px", padding: "20px" }}
+      >
+        <h3 style={{ marginTop: 0 }}>
+          Nearby Hospital Comparison
+        </h3>
+
+        <p style={{ color: "#64748b", fontSize: "13px" }}>
+          Hospitals ranked by estimated road travel time.
+        </p>
+
+        {hospitalComparison.length === 0 ? (
+          <p style={{ color: "#64748b" }}>
+            No hospital comparison data is available for this
+            incident. Create a new test incident after confirming
+            the backend saves hospital_comparison.
+          </p>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table
+              style={{
+                width: "100%",
+                borderCollapse: "collapse",
+                textAlign: "left",
+                fontSize: "14px",
+              }}
+            >
+              <thead>
+                <tr style={{ borderBottom: "1px solid #e2e8f0" }}>
+                  <th style={{ padding: "12px 8px" }}>Rank</th>
+                  <th style={{ padding: "12px 8px" }}>Hospital</th>
+                  <th style={{ padding: "12px 8px" }}>Straight-line</th>
+                  <th style={{ padding: "12px 8px" }}>Road distance</th>
+                  <th style={{ padding: "12px 8px" }}>Estimated ETA</th>
+                  <th style={{ padding: "12px 8px" }}>Status</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {hospitalComparison.map((hospital, index) => (
+                  <tr
+                    key={hospital.hospital_id || index}
+                    style={{
+                      borderBottom: "1px solid #e2e8f0",
+                      background: hospital.recommended
+                        ? "#f0fdf4"
+                        : "transparent",
+                    }}
+                  >
+                    <td style={{ padding: "12px 8px" }}>
+                      {hospital.rank ?? index + 1}
+                    </td>
+
+                    <td style={{ padding: "12px 8px" }}>
+                      <strong>
+                        {hospital.hospital_name || "Hospital"}
+                      </strong>
+                      {hospital.hospital_id && (
+                        <div style={{ color: "#64748b", fontSize: "12px" }}>
+                          {hospital.hospital_id}
+                        </div>
+                      )}
+                    </td>
+
+                    <td style={{ padding: "12px 8px" }}>
+                      {Number.isFinite(Number(hospital.straight_line_distance_km))
+                        ? `${Number(hospital.straight_line_distance_km).toFixed(2)} km`
+                        : "—"}
+                    </td>
+
+                    <td style={{ padding: "12px 8px" }}>
+                      {Number.isFinite(Number(hospital.road_distance_km))
+                        ? `${Number(hospital.road_distance_km).toFixed(2)} km`
+                        : "—"}
+                    </td>
+
+                    <td style={{ padding: "12px 8px" }}>
+                      {Number.isFinite(Number(hospital.eta_minutes))
+                        ? `${Number(hospital.eta_minutes).toFixed(1)} min`
+                        : "—"}
+                    </td>
+
+                    <td style={{ padding: "12px 8px" }}>
+                      {hospital.recommended ? (
+                        <span style={{ color: "#15803d", fontWeight: 700 }}>
+                          Recommended
+                        </span>
+                      ) : (
+                        <span style={{ color: "#64748b" }}>
+                          Alternative
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
       {/* ======================================================
           AMBULANCE ROUTE
