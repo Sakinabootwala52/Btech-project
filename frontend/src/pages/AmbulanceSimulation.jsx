@@ -1069,29 +1069,18 @@ export default function AmbulanceSimulation() {
           </div>
 
           <div className="map-legend">
-            <span>! Accident</span>
-            <span>H Hospital</span>
-            <span>🚑 Ambulance</span>
-            <span>Blue line: OSRM road route</span>
+            
           </div>
 
           {!incidentPoint &&
             !hospitalPoint &&
             !currentPosition && (
               <p className="empty-notifications">
-                No mapped assignment data is available. Create an
-                incident, register a hospital and ambulance, and
-                dispatch the ambulance. This map does not invent
-                marker locations.
+                
               </p>
             )}
 
-          <p className="map-disclaimer">
-            Map markers use coordinates returned by your backend.
-            The ambulance marker appears only when a saved or
-            simulated position exists. OSRM supplies road geometry
-            and estimated duration, not live traffic conditions.
-          </p>
+          
         </section>
 
         <aside className="ambulance-sidebar">
