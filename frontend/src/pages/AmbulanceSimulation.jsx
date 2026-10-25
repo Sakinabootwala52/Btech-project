@@ -1,5 +1,5 @@
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CircleMarker,
   MapContainer,
@@ -17,35 +17,83 @@ import { api } from "../api";
 const DEFAULT_CENTER = [18.5204, 73.8567];
 const ROUTE_STEPS = 24;
 const STEP_DELAY_MS = 700;
+const REFRESH_INTERVAL_MS = 5000;
 
-// Accept the coordinate shapes used by the API and MongoDB records.
-// GeoJSON coordinates are [longitude, latitude]; Leaflet route points are [latitude, longitude].
-const toPoint = (value) => {
-  if (!value) return null;
-
-  if (Array.isArray(value.coordinates) && value.type === "Point") {
-    const [longitude, latitude] = value.coordinates;
-    return toPoint({ latitude, longitude });
+// Parse supported API, MongoDB, and GeoJSON coordinate formats.
+const toPoint = (value, depth = 0) => {
+  if (!value || typeof value !== "object" || depth > 5) {
+    return null;
   }
 
-  if (Array.isArray(value.coordinates) && value.coordinates.length >= 2) {
+  if (value.type === "Feature" && value.geometry) {
+    return toPoint(value.geometry, depth + 1);
+  }
+
+  if (
+    value.type === "Point" &&
+    Array.isArray(value.coordinates) &&
+    value.coordinates.length >= 2
+  ) {
     const [longitude, latitude] = value.coordinates;
-    return toPoint({ latitude, longitude });
+    return toPoint({ latitude, longitude }, depth + 1);
+  }
+
+  if (
+    value.geometry?.type === "Point" &&
+    Array.isArray(value.geometry.coordinates)
+  ) {
+    return toPoint(value.geometry, depth + 1);
+  }
+
+  if (
+    Array.isArray(value.coordinates) &&
+    value.coordinates.length >= 2
+  ) {
+    const [longitude, latitude] = value.coordinates;
+    return toPoint({ latitude, longitude }, depth + 1);
   }
 
   if (Array.isArray(value) && value.length >= 2) {
-    // Coordinate arrays from the map/backend are [latitude, longitude].
-    return toPoint({ latitude: value[0], longitude: value[1] });
+    // Plain arrays in this application use [latitude, longitude].
+    return toPoint(
+      { latitude: value[0], longitude: value[1] },
+      depth + 1
+    );
   }
 
-  const nested = value.location || value.gps || value.position;
-  if (nested && nested !== value) {
-    const point = toPoint(nested);
-    if (point) return point;
+  const nestedKeys = [
+    "location",
+    "gps",
+    "position",
+    "coordinates",
+    "geometry",
+  ];
+
+  for (const key of nestedKeys) {
+    const nested = value[key];
+
+    if (nested && nested !== value && typeof nested === "object") {
+      const point = toPoint(nested, depth + 1);
+      if (point) return point;
+    }
   }
 
-  const latitude = Number(value.latitude ?? value.lat);
-  const longitude = Number(value.longitude ?? value.lng ?? value.lon);
+  const rawLatitude = value.latitude ?? value.lat;
+  const rawLongitude = value.longitude ?? value.lng ?? value.lon;
+
+  if (
+    rawLatitude === null ||
+    rawLatitude === undefined ||
+    rawLongitude === null ||
+    rawLongitude === undefined ||
+    rawLatitude === "" ||
+    rawLongitude === ""
+  ) {
+    return null;
+  }
+
+  const latitude = Number(rawLatitude);
+  const longitude = Number(rawLongitude);
 
   if (
     !Number.isFinite(latitude) ||
@@ -62,20 +110,37 @@ const toPoint = (value) => {
   return { latitude, longitude };
 };
 
+// Saved Leaflet route arrays use [latitude, longitude].
+// Object coordinates are also supported.
 const toRouteCoordinates = (value) => {
   if (!Array.isArray(value)) return [];
+
   return value
     .map((point) => {
       if (Array.isArray(point) && point.length >= 2) {
         const latitude = Number(point[0]);
         const longitude = Number(point[1]);
-        return Number.isFinite(latitude) && Number.isFinite(longitude) &&
-          latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180
-          ? [latitude, longitude]
-          : null;
+
+        if (
+          Number.isFinite(latitude) &&
+          Number.isFinite(longitude) &&
+          latitude >= -90 &&
+          latitude <= 90 &&
+          longitude >= -180 &&
+          longitude <= 180 &&
+          !(latitude === 0 && longitude === 0)
+        ) {
+          return [latitude, longitude];
+        }
+
+        return null;
       }
+
       const parsed = toPoint(point);
-      return parsed ? [parsed.latitude, parsed.longitude] : null;
+
+      return parsed
+        ? [parsed.latitude, parsed.longitude]
+        : null;
     })
     .filter(Boolean);
 };
@@ -84,7 +149,10 @@ const mapPosition = (point) =>
   point ? [point.latitude, point.longitude] : null;
 
 const formatNumber = (value, digits = 2) =>
-  value === null || value === undefined || value === "" || !Number.isFinite(Number(value))
+  value === null ||
+  value === undefined ||
+  value === "" ||
+  !Number.isFinite(Number(value))
     ? "—"
     : Number(value).toFixed(digits);
 
@@ -119,24 +187,34 @@ function MapRecenter({ points }) {
   const map = useMap();
 
   useEffect(() => {
-    const validPoints = points.filter(Boolean);
-    if (!validPoints.length) return;
+    const validPoints = points.filter(
+      (point) =>
+        Array.isArray(point) &&
+        point.length === 2 &&
+        point.every(Number.isFinite)
+    );
+
+    if (validPoints.length === 0) return;
 
     if (validPoints.length === 1) {
       map.setView(validPoints[0], 14);
       return;
     }
 
-    map.fitBounds(validPoints, { padding: [35, 35], maxZoom: 15 });
+    map.fitBounds(validPoints, {
+      padding: [35, 35],
+      maxZoom: 15,
+    });
   }, [map, points]);
 
   return null;
 }
 
 function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+// Request a road route from the public OSRM service.
 async function getRoadRoute(start, end) {
   if (!start || !end) {
     throw new Error(
@@ -153,7 +231,9 @@ async function getRoadRoute(start, end) {
   const response = await fetch(url);
 
   if (!response.ok) {
-    throw new Error("The road-routing service could not calculate a route.");
+    throw new Error(
+      "The road-routing service is unavailable. Please try again."
+    );
   }
 
   const data = await response.json();
@@ -166,18 +246,19 @@ async function getRoadRoute(start, end) {
     route.geometry.coordinates.length < 2
   ) {
     throw new Error(
-      "No road route was found for these coordinates. Check the saved locations."
+      "No road route was found. Check the saved incident and hospital coordinates."
     );
   }
 
   return {
-    // OSRM returns [longitude, latitude].
-    coordinates: route.geometry.coordinates.map(([longitude, latitude]) => [
-      latitude,
-      longitude,
-    ]),
+    // OSRM uses [longitude, latitude].
+    // Leaflet uses [latitude, longitude].
+    coordinates: route.geometry.coordinates.map(
+      ([longitude, latitude]) => [latitude, longitude]
+    ),
     distanceKm: route.distance / 1000,
     durationMinutes: route.duration / 60,
+    source: "OSRM",
   };
 }
 
@@ -193,6 +274,60 @@ function getHospitalPoint(row) {
   return toPoint(row?.hospital?.location) || toPoint(row?.hospital);
 }
 
+function getSavedRoute(tracking) {
+  const phase = tracking?.phase;
+
+  const savedRoute =
+    phase === "TO_HOSPITAL" || phase === "COMPLETED"
+      ? tracking?.return_route_coordinates ||
+        tracking?.route_coordinates
+      : tracking?.route_coordinates;
+
+  const coordinates = toRouteCoordinates(savedRoute);
+
+  if (coordinates.length < 2) return null;
+
+  const distanceValue =
+    phase === "TO_HOSPITAL" || phase === "COMPLETED"
+      ? tracking?.return_route_distance_km ??
+        tracking?.route_distance_km
+      : tracking?.route_distance_km;
+
+  const durationValue =
+    phase === "TO_HOSPITAL" || phase === "COMPLETED"
+      ? tracking?.return_route_duration_minutes ??
+        tracking?.route_duration_minutes
+      : tracking?.route_duration_minutes;
+
+  const distanceKm =
+    distanceValue === null ||
+    distanceValue === undefined ||
+    distanceValue === ""
+      ? null
+      : Number(distanceValue);
+
+  const durationMinutes =
+    durationValue === null ||
+    durationValue === undefined ||
+    durationValue === ""
+      ? null
+      : Number(durationValue);
+
+  return {
+    coordinates,
+    distanceKm: Number.isFinite(distanceKm) ? distanceKm : null,
+    durationMinutes: Number.isFinite(durationMinutes)
+      ? durationMinutes
+      : null,
+    source:
+      phase === "TO_HOSPITAL" || phase === "COMPLETED"
+        ? tracking?.return_route_source ||
+          tracking?.route_source ||
+          "SAVED"
+        : tracking?.route_source || "SAVED",
+  };
+}
+
 export default function AmbulanceSimulation() {
   const [assignments, setAssignments] = useState([]);
   const [selectedId, setSelectedId] = useState("");
@@ -206,13 +341,34 @@ export default function AmbulanceSimulation() {
   const [vehiclePosition, setVehiclePosition] = useState(null);
   const [progress, setProgress] = useState(0);
   const [activity, setActivity] = useState([]);
+  const [hospitalReached, setHospitalReached] = useState(false);
 
-  const loadAssignments = useCallback(async () => {
-    setLoading(true);
-    setError("");
+  const busyRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const loadAssignments = useCallback(async (showLoading = true) => {
+    if (showLoading) {
+      setLoading(true);
+      setError("");
+    }
 
     try {
       const response = await api.ambulanceSim.assignments();
+
+      if (!mountedRef.current) return;
+
       const rows = Array.isArray(response?.ambulances)
         ? response.ambulances
         : [];
@@ -221,7 +377,10 @@ export default function AmbulanceSimulation() {
       setAssignments(rows);
 
       setSelectedId((current) => {
-        if (current && rows.some((row) => getAssignmentId(row) === current)) {
+        if (
+          current &&
+          rows.some((row) => getAssignmentId(row) === current)
+        ) {
           return current;
         }
 
@@ -232,22 +391,45 @@ export default function AmbulanceSimulation() {
         return getAssignmentId(assigned || rows[0]) || "";
       });
     } catch (err) {
+      if (!mountedRef.current) return;
+
       setBackendConnected(false);
-      setError(
-        err.message ||
-          "Could not load ambulance assignments. Check your login and Flask server."
-      );
+
+      if (showLoading) {
+        setError(
+          err?.message ||
+            "Could not load ambulance assignments. Check your Flask server and API connection."
+        );
+      }
+
+      console.error("Could not load ambulance assignments:", err);
     } finally {
-      setLoading(false);
+      if (mountedRef.current && showLoading) {
+        setLoading(false);
+      }
     }
   }, []);
 
+  // Initial load.
   useEffect(() => {
     loadAssignments();
   }, [loadAssignments]);
 
+  // Refresh assignments every five seconds, but not during a trip.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (busyRef.current || !mountedRef.current) return;
+      loadAssignments(false);
+    }, REFRESH_INTERVAL_MS);
+
+    return () => window.clearInterval(timer);
+  }, [loadAssignments]);
+
   const selected = useMemo(
-    () => assignments.find((row) => getAssignmentId(row) === selectedId) || null,
+    () =>
+      assignments.find(
+        (row) => getAssignmentId(row) === selectedId
+      ) || null,
     [assignments, selectedId]
   );
 
@@ -258,16 +440,22 @@ export default function AmbulanceSimulation() {
   const incidentPoint = getIncidentPoint(selected);
   const hospitalPoint = getHospitalPoint(selected);
 
-  const tracking = incident?.tracking || incident?.ambulance_tracking || {};
+  const tracking =
+    incident?.tracking ||
+    incident?.ambulance_tracking ||
+    ambulance?.tracking ||
+    {};
+
   const trackingPosition = toPoint(tracking?.position);
+
   const ambulanceStoredPosition =
     toPoint(ambulance?.last_position) ||
     toPoint(ambulance?.current_position) ||
     toPoint(ambulance?.location);
 
-  // Never place an ambulance at the hospital/scene just because those coordinates
-  // exist. The ambulance marker must come from a saved or actively simulated position.
-  const currentPosition = vehiclePosition || trackingPosition || ambulanceStoredPosition;
+  // Do not invent an ambulance position.
+  const currentPosition =
+    vehiclePosition || trackingPosition || ambulanceStoredPosition;
 
   const mapPoints = useMemo(
     () =>
@@ -286,44 +474,52 @@ export default function AmbulanceSimulation() {
     ]
   );
 
+  // Restore a saved route when the selected assignment changes.
   useEffect(() => {
     if (busy) return;
 
-    const savedRoute =
-      tracking?.phase === "TO_HOSPITAL" || tracking?.phase === "COMPLETED"
-        ? tracking?.return_route_coordinates || tracking?.route_coordinates
-        : tracking?.route_coordinates;
-    const coordinates = toRouteCoordinates(savedRoute);
+    const savedRoute = getSavedRoute(tracking);
 
-    if (coordinates.length >= 2) {
-      setRouteCoordinates(coordinates);
-      const distanceValue =
-        tracking?.return_route_distance_km ?? tracking?.route_distance_km;
-      const durationValue =
-        tracking?.return_route_duration_minutes ?? tracking?.route_duration_minutes;
-      const distanceKm =
-        distanceValue === null || distanceValue === undefined || distanceValue === ""
-          ? null
-          : Number(distanceValue);
-      const durationMinutes =
-        durationValue === null || durationValue === undefined || durationValue === ""
-          ? null
-          : Number(durationValue);
-      setRouteInfo({
-        coordinates,
-        distanceKm: Number.isFinite(distanceKm) ? distanceKm : null,
-        durationMinutes: Number.isFinite(durationMinutes) ? durationMinutes : null,
-        source: tracking?.return_route_source || tracking?.route_source || "SAVED",
-      });
-      setProgress(Number.isFinite(Number(tracking?.progress))
-        ? Math.max(0, Math.min(100, Math.round(Number(tracking.progress) * 100)))
-        : 0);
+    if (savedRoute) {
+      setRouteCoordinates(savedRoute.coordinates);
+      setRouteInfo(savedRoute);
+
+      const savedProgress = Number(tracking?.progress);
+
+      setProgress(
+        Number.isFinite(savedProgress)
+          ? Math.max(
+              0,
+              Math.min(100, Math.round(savedProgress * 100))
+            )
+          : 0
+      );
+
+      setHospitalReached(
+        tracking?.phase === "TO_HOSPITAL" &&
+          Number.isFinite(savedProgress) &&
+          savedProgress >= 1
+      );
     } else {
       setRouteCoordinates([]);
       setRouteInfo(null);
       setProgress(0);
+      setHospitalReached(false);
     }
-  }, [selectedId, assignments, busy]);
+  }, [
+    selectedId,
+    tracking?.phase,
+    tracking?.progress,
+    tracking?.route_coordinates,
+    tracking?.route_distance_km,
+    tracking?.route_duration_minutes,
+    tracking?.route_source,
+    tracking?.return_route_coordinates,
+    tracking?.return_route_distance_km,
+    tracking?.return_route_duration_minutes,
+    tracking?.return_route_source,
+    busy,
+  ]);
 
   const addActivity = useCallback((text) => {
     setActivity((items) =>
@@ -340,6 +536,9 @@ export default function AmbulanceSimulation() {
 
   const refreshAfterAction = useCallback(async () => {
     const response = await api.ambulanceSim.assignments();
+
+    if (!mountedRef.current) return;
+
     const rows = Array.isArray(response?.ambulances)
       ? response.ambulances
       : [];
@@ -347,56 +546,58 @@ export default function AmbulanceSimulation() {
     setBackendConnected(true);
     setAssignments(rows);
   }, []);
-  useEffect(() => {
-  const timer = window.setInterval(async () => {
-    try {
-      const response = await api.ambulanceSim.assignments();
 
-      const rows = Array.isArray(response?.ambulances)
-        ? response.ambulances
-        : [];
-
-      setBackendConnected(true);
-      setAssignments(rows);
-    } catch (err) {
-      setBackendConnected(false);
-      console.error("Could not refresh ambulance assignments:", err);
-    }
-  }, 5000);
-
-  return () => window.clearInterval(timer);
-}, []);
-
+  // Animate the ambulance along the road route and save every position.
   const animateLeg = useCallback(
-    async ({ ambulanceId, route, phase, startIndex = 0 }) => {
+    async ({ ambulanceId, route, phase }) => {
       const coordinates = route.coordinates;
       const total = coordinates.length;
+
+      if (total < 2) {
+        throw new Error(
+          "The selected road route has no usable coordinates."
+        );
+      }
 
       setRouteCoordinates(coordinates);
       setRouteInfo(route);
       setProgress(0);
 
-      // Send fewer, evenly spaced points to the backend to avoid
-      // excessive requests while keeping the marker moving smoothly.
       const indices = Array.from(
         new Set(
-          Array.from({ length: ROUTE_STEPS + 1 }, (_, index) =>
-            Math.round((index / ROUTE_STEPS) * (total - 1))
+          Array.from(
+            { length: ROUTE_STEPS + 1 },
+            (_, index) =>
+              Math.round(
+                (index / ROUTE_STEPS) * (total - 1)
+              )
           )
         )
-      ).filter((index) => index >= startIndex);
+      );
 
       for (let step = 0; step < indices.length; step += 1) {
         const index = indices[step];
         const [latitude, longitude] = coordinates[index];
-        const fraction = index / Math.max(total - 1, 1);
+
+        const fraction =
+          index / Math.max(total - 1, 1);
 
         setVehiclePosition({ latitude, longitude });
         setProgress(Math.round(fraction * 100));
 
-        const remainingKm = route.distanceKm * (1 - fraction);
-        const etaSeconds = route.durationMinutes * 60 * (1 - fraction);
+        const distanceKm = Number(route.distanceKm);
+        const durationMinutes = Number(route.durationMinutes);
 
+        const remainingKm = Number.isFinite(distanceKm)
+          ? distanceKm * (1 - fraction)
+          : null;
+
+        const etaSeconds = Number.isFinite(durationMinutes)
+          ? durationMinutes * 60 * (1 - fraction)
+          : null;
+
+        // Keep the existing Flask position endpoint.
+        // If this request fails, stop and show the error.
         await api.ambulanceSim.position(ambulanceId, {
           latitude,
           longitude,
@@ -414,11 +615,18 @@ export default function AmbulanceSimulation() {
       }
 
       setProgress(100);
+
+      const [latitude, longitude] =
+        coordinates[coordinates.length - 1];
+
+      setVehiclePosition({ latitude, longitude });
     },
     []
   );
 
   const startTrip = async () => {
+    if (busy) return;
+
     if (!selected || !ambulance?.ambulance_id) {
       setError("Select an ambulance assignment first.");
       return;
@@ -433,7 +641,19 @@ export default function AmbulanceSimulation() {
 
     if (!["DISPATCHED", "EN_ROUTE"].includes(incident?.status)) {
       setError(
-        `The trip to the accident cannot start from incident status ${incident?.status || "UNKNOWN"}. Dispatch the ambulance first.`
+        `The trip to the accident cannot start from incident status ${
+          incident?.status || "UNKNOWN"
+        }. Dispatch the ambulance first.`
+      );
+      return;
+    }
+
+    if (
+      tracking?.phase === "TO_SCENE" ||
+      tracking?.phase === "TO_HOSPITAL"
+    ) {
+      setError(
+        "A trip is already in progress. Continue the existing trip instead of starting it again."
       );
       return;
     }
@@ -441,9 +661,14 @@ export default function AmbulanceSimulation() {
     setBusy(true);
     setError("");
     setMessage("");
+    setHospitalReached(false);
 
     try {
-      const route = await getRoadRoute(hospitalPoint, incidentPoint);
+      // Hospital -> accident scene.
+      const route = await getRoadRoute(
+        hospitalPoint,
+        incidentPoint
+      );
 
       await api.ambulanceSim.start(ambulance.ambulance_id, {
         source: "SIMULATION",
@@ -454,6 +679,7 @@ export default function AmbulanceSimulation() {
       });
 
       setVehiclePosition(hospitalPoint);
+
       addActivity(
         `${ambulance.ambulance_id} started toward incident ${incident.incident_id}.`
       );
@@ -464,15 +690,24 @@ export default function AmbulanceSimulation() {
         phase: "TO_SCENE",
       });
 
-      await api.ambulanceSim.arriveScene(ambulance.ambulance_id);
+      await api.ambulanceSim.arriveScene(
+        ambulance.ambulance_id
+      );
 
       setVehiclePosition(incidentPoint);
       setMessage("Ambulance arrived at the accident scene.");
-      addActivity(`Ambulance arrived at ${incident.incident_id}.`);
+
+      addActivity(
+        `Ambulance arrived at ${incident.incident_id}.`
+      );
 
       await refreshAfterAction();
     } catch (err) {
-      setError(err.message || "Could not complete the trip to the accident.");
+      setError(
+        err?.message ||
+          "Could not complete the trip to the accident."
+      );
+
       await refreshAfterAction().catch(() => {});
     } finally {
       setBusy(false);
@@ -480,7 +715,12 @@ export default function AmbulanceSimulation() {
   };
 
   const transportToHospital = async () => {
-    if (!selected || !ambulance?.ambulance_id) return;
+    if (busy) return;
+
+    if (!selected || !ambulance?.ambulance_id) {
+      setError("Select an ambulance assignment first.");
+      return;
+    }
 
     if (!incidentPoint || !hospitalPoint) {
       setError("The incident or hospital coordinates are missing.");
@@ -497,23 +737,39 @@ export default function AmbulanceSimulation() {
       return;
     }
 
+    if (tracking?.phase === "TO_HOSPITAL") {
+      setError("Hospital transport has already started.");
+      return;
+    }
+
     setBusy(true);
     setError("");
     setMessage("");
+    setHospitalReached(false);
 
     try {
-      const route = await getRoadRoute(incidentPoint, hospitalPoint);
+      // Accident scene -> assigned hospital.
+      const route = await getRoadRoute(
+        incidentPoint,
+        hospitalPoint
+      );
 
-      await api.ambulanceSim.departScene(ambulance.ambulance_id, {
-        route_source: "OSRM",
-        route_coordinates: route.coordinates,
-        route_distance_km: route.distanceKm,
-        route_duration_minutes: route.durationMinutes,
-      });
+      await api.ambulanceSim.departScene(
+        ambulance.ambulance_id,
+        {
+          route_source: "OSRM",
+          route_coordinates: route.coordinates,
+          route_distance_km: route.distanceKm,
+          route_duration_minutes: route.durationMinutes,
+        }
+      );
 
       setVehiclePosition(incidentPoint);
+
       addActivity(
-        `Transport started from incident ${incident.incident_id} to ${hospital.name}.`
+        `Transport started from incident ${incident.incident_id} to ${
+          hospital?.name || "the assigned hospital"
+        }.`
       );
 
       await animateLeg({
@@ -523,14 +779,25 @@ export default function AmbulanceSimulation() {
       });
 
       setVehiclePosition(hospitalPoint);
+      setHospitalReached(true);
+
       setMessage(
         "The ambulance reached the hospital. Complete the trip to release the ambulance."
       );
-      addActivity(`Ambulance reached ${hospital.name}.`);
+
+      addActivity(
+        `Ambulance reached ${
+          hospital?.name || "the assigned hospital"
+        }.`
+      );
 
       await refreshAfterAction();
     } catch (err) {
-      setError(err.message || "Could not complete hospital transport.");
+      setError(
+        err?.message ||
+          "Could not complete hospital transport."
+      );
+
       await refreshAfterAction().catch(() => {});
     } finally {
       setBusy(false);
@@ -538,33 +805,63 @@ export default function AmbulanceSimulation() {
   };
 
   const completeTrip = async () => {
-    if (!ambulance?.ambulance_id) return;
+    if (busy) return;
+
+    if (!ambulance?.ambulance_id) {
+      setError("No ambulance is selected.");
+      return;
+    }
+
+    if (!hospitalReached) {
+      setError(
+        "Complete the trip to the hospital before releasing the ambulance."
+      );
+      return;
+    }
 
     setBusy(true);
     setError("");
     setMessage("");
 
     try {
-      await api.ambulanceSim.complete(ambulance.ambulance_id);
-      setMessage("Trip completed. The ambulance is now available.");
-      addActivity(`Trip completed for ${incident?.incident_id || "incident"}.`);
+      await api.ambulanceSim.complete(
+        ambulance.ambulance_id
+      );
+
+      setMessage(
+        "Trip completed. The ambulance is now available."
+      );
+
+      addActivity(
+        `Trip completed for ${
+          incident?.incident_id || "incident"
+        }.`
+      );
 
       setProgress(100);
+      setHospitalReached(false);
+
       await refreshAfterAction();
     } catch (err) {
-      setError(err.message || "Could not complete the ambulance trip.");
+      setError(
+        err?.message ||
+          "Could not complete the ambulance trip."
+      );
     } finally {
       setBusy(false);
     }
   };
 
-  const incidentStatus = incident?.status || "NO ACTIVE INCIDENT";
+  const incidentStatus =
+    incident?.status || "NO ACTIVE INCIDENT";
+
   const ambulanceStatus = ambulance?.status || "UNKNOWN";
   const phase = tracking?.phase || "NOT STARTED";
 
   const canStart =
     !!ambulance?.ambulance_id &&
-    ["DISPATCHED", "EN_ROUTE"].includes(incident?.status);
+    ["DISPATCHED", "EN_ROUTE"].includes(incident?.status) &&
+    !["TO_SCENE", "TO_HOSPITAL", "COMPLETED"].includes(phase);
 
   const canTransport =
     incident?.status === "ARRIVED" &&
@@ -572,17 +869,23 @@ export default function AmbulanceSimulation() {
     phase !== "COMPLETED";
 
   const canComplete =
-    incident?.status === "ARRIVED" && phase === "TO_HOSPITAL";
+    incident?.status === "ARRIVED" &&
+    phase === "TO_HOSPITAL" &&
+    hospitalReached;
 
-  const hasCoordinates = !!incidentPoint && !!hospitalPoint;
+  const hasCoordinates =
+    !!incidentPoint && !!hospitalPoint;
+
+  const trackingPoint = toPoint(tracking?.position);
 
   return (
     <div className="ambulance-page">
       <header className="ambulance-header">
         <div>
-          <div className="ambulance-eyebrow">EMERGENCY RESPONSE SYSTEM</div>
+          <div className="ambulance-eyebrow">
+            EMERGENCY RESPONSE SYSTEM
+          </div>
           <h1>Ambulance Command Center</h1>
-          <p>Live assignment data · Road routing · Ambulance trip tracking</p>
         </div>
 
         <div className="ambulance-live-status">
@@ -593,19 +896,23 @@ export default function AmbulanceSimulation() {
               ? "BACKEND UNAVAILABLE"
               : assignments.length === 0
                 ? "CONNECTED · NO RECORDS"
-                : "BACKEND CONNECTED"}
+                : "CONNECTED · LIVE UPDATES"}
         </div>
       </header>
 
       <section className="ambulance-stats">
         <article className="ambulance-stat">
           <span>Ambulance ID</span>
-          <strong>{ambulance?.ambulance_id || "—"}</strong>
+          <strong>
+            {ambulance?.ambulance_id || "—"}
+          </strong>
         </article>
 
         <article className="ambulance-stat">
           <span>Incident ID</span>
-          <strong>{incident?.incident_id || "No assignment"}</strong>
+          <strong>
+            {incident?.incident_id || "No assignment"}
+          </strong>
         </article>
 
         <article className="ambulance-stat">
@@ -646,20 +953,22 @@ export default function AmbulanceSimulation() {
           <div className="panel-heading">
             <div>
               <h2>Ambulance Tracking Map</h2>
-              <p>Locations and assignment details from your backend</p>
             </div>
 
             <button
               type="button"
               className="secondary-action"
-              onClick={loadAssignments}
+              onClick={() => loadAssignments()}
               disabled={loading || busy}
             >
               {loading ? "Refreshing..." : "Refresh Data"}
             </button>
           </div>
 
-          <div className="ambulance-map" style={{ height: 480, width: "100%" }}>
+          <div
+            className="ambulance-map"
+            style={{ height: 480, width: "100%" }}
+          >
             <MapContainer
               center={DEFAULT_CENTER}
               zoom={12}
@@ -679,13 +988,16 @@ export default function AmbulanceSimulation() {
                   icon={accidentIcon}
                 >
                   <Popup>
-                    <strong>Accident: {incident?.incident_id}</strong>
+                    <strong>
+                      Accident: {incident?.incident_id || "Unknown"}
+                    </strong>
                     <br />
                     Severity: {titleCase(incident?.severity)}
                     <br />
                     Status: {titleCase(incident?.status)}
                     <br />
-                    {incidentPoint.latitude}, {incidentPoint.longitude}
+                    {incidentPoint.latitude},{" "}
+                    {incidentPoint.longitude}
                   </Popup>
                 </Marker>
               )}
@@ -696,16 +1008,19 @@ export default function AmbulanceSimulation() {
                   icon={hospitalIcon}
                 >
                   <Popup>
-                    <strong>{hospital?.name || "Assigned hospital"}</strong>
+                    <strong>
+                      {hospital?.name || "Assigned hospital"}
+                    </strong>
                     <br />
                     Hospital ID: {hospital?.hospital_id || "—"}
                     <br />
-                    {hospitalPoint.latitude}, {hospitalPoint.longitude}
+                    {hospitalPoint.latitude},{" "}
+                    {hospitalPoint.longitude}
                   </Popup>
                 </Marker>
               )}
 
-              {routeCoordinates.length > 0 && (
+              {routeCoordinates.length >= 2 && (
                 <Polyline
                   positions={routeCoordinates}
                   pathOptions={{
@@ -722,27 +1037,32 @@ export default function AmbulanceSimulation() {
                   icon={ambulanceIcon}
                 >
                   <Popup>
-                    <strong>{ambulance?.ambulance_id || "Ambulance"}</strong>
+                    <strong>
+                      {ambulance?.ambulance_id || "Ambulance"}
+                    </strong>
                     <br />
                     Status: {titleCase(ambulanceStatus)}
                     <br />
                     Phase: {titleCase(phase)}
                     <br />
-                    {currentPosition.latitude}, {currentPosition.longitude}
+                    {currentPosition.latitude},{" "}
+                    {currentPosition.longitude}
                   </Popup>
                 </Marker>
               )}
 
-              {tracking?.position && (
+              {trackingPoint && (
                 <CircleMarker
-                  center={[
-                    tracking.position.latitude,
-                    tracking.position.longitude,
-                  ]}
+                  center={mapPosition(trackingPoint)}
                   radius={5}
-                  pathOptions={{ color: "#15803d", fillOpacity: 0.7 }}
+                  pathOptions={{
+                    color: "#15803d",
+                    fillOpacity: 0.7,
+                  }}
                 >
-                  <Popup>Latest position saved by the backend</Popup>
+                  <Popup>
+                    Latest position saved by the backend
+                  </Popup>
                 </CircleMarker>
               )}
             </MapContainer>
@@ -755,30 +1075,35 @@ export default function AmbulanceSimulation() {
             <span>Blue line: OSRM road route</span>
           </div>
 
-          {!incidentPoint && !hospitalPoint && !currentPosition && (
-            <p className="empty-notifications">
-              No mapped assignment data is available. Create an incident, register a hospital and ambulance, then dispatch the ambulance. This map will not invent marker locations.
-            </p>
-          )}
+          {!incidentPoint &&
+            !hospitalPoint &&
+            !currentPosition && (
+              <p className="empty-notifications">
+                No mapped assignment data is available. Create an
+                incident, register a hospital and ambulance, and
+                dispatch the ambulance. This map does not invent
+                marker locations.
+              </p>
+            )}
 
           <p className="map-disclaimer">
-            Map markers use coordinates returned by your backend. The ambulance marker appears only when a stored position or active simulation position exists. OSRM provides road geometry and an estimated duration, not live traffic conditions.
+            Map markers use coordinates returned by your backend.
+            The ambulance marker appears only when a saved or
+            simulated position exists. OSRM supplies road geometry
+            and estimated duration, not live traffic conditions.
           </p>
         </section>
 
         <aside className="ambulance-sidebar">
           <section className="side-panel">
             <h2>Ambulance Assignments</h2>
-            <p className="side-description">
-              Select an assignment returned by your Flask API.
-            </p>
 
             {loading ? (
               <p>Loading assignments from the backend…</p>
             ) : assignments.length === 0 ? (
               <p className="empty-notifications">
-                No ambulance records were returned. Register an ambulance and
-                dispatch it to an incident first.
+                No ambulance records were returned. Register an
+                ambulance and dispatch it to an incident first.
               </p>
             ) : (
               <label className="assignment-select-label">
@@ -791,15 +1116,20 @@ export default function AmbulanceSimulation() {
                     setRouteInfo(null);
                     setVehiclePosition(null);
                     setProgress(0);
+                    setHospitalReached(false);
                     setError("");
                     setMessage("");
                   }}
                   disabled={busy}
                 >
-                  {assignments.map((row) => {
+                  {assignments.map((row, index) => {
                     const id = getAssignmentId(row);
+
                     return (
-                      <option key={id || JSON.stringify(row)} value={id}>
+                      <option
+                        key={id || `assignment-${index}`}
+                        value={id}
+                      >
                         {id || "Unnamed ambulance"} —{" "}
                         {row?.incident?.incident_id || "Unassigned"} (
                         {titleCase(row?.ambulance?.status)})
@@ -814,18 +1144,24 @@ export default function AmbulanceSimulation() {
               <>
                 <div className="selected-hospital-summary">
                   <span>Assigned incident</span>
-                  <strong>{incident?.incident_id || "No incident"}</strong>
+                  <strong>
+                    {incident?.incident_id || "No incident"}
+                  </strong>
                   <p>Status: {titleCase(incidentStatus)}</p>
                   <small>
-                    Severity: {titleCase(incident?.severity)} · Camera:{" "}
-                    {incident?.camera_id || "—"}
+                    Severity: {titleCase(incident?.severity)} ·
+                    Camera: {incident?.camera_id || "—"}
                   </small>
                 </div>
 
                 <div className="selected-hospital-summary">
                   <span>Destination hospital</span>
-                  <strong>{hospital?.name || "No hospital assigned"}</strong>
-                  <p>Hospital ID: {hospital?.hospital_id || "—"}</p>
+                  <strong>
+                    {hospital?.name || "No hospital assigned"}
+                  </strong>
+                  <p>
+                    Hospital ID: {hospital?.hospital_id || "—"}
+                  </p>
                   <small>
                     {hospitalPoint
                       ? `${hospitalPoint.latitude}, ${hospitalPoint.longitude}`
@@ -835,8 +1171,9 @@ export default function AmbulanceSimulation() {
 
                 {!hasCoordinates && (
                   <p role="alert">
-                    This assignment cannot be routed until both the incident
-                    and hospital have valid latitude/longitude fields.
+                    This assignment cannot be routed until both
+                    the incident and hospital have valid
+                    latitude/longitude coordinates.
                   </p>
                 )}
 
@@ -844,16 +1181,25 @@ export default function AmbulanceSimulation() {
                   type="button"
                   className="primary-action"
                   onClick={startTrip}
-                  disabled={busy || loading || !canStart || !hasCoordinates}
+                  disabled={
+                    busy || loading || !canStart || !hasCoordinates
+                  }
                 >
-                  {busy ? "Processing trip…" : "Start Trip to Accident"}
+                  {busy
+                    ? "Processing trip…"
+                    : "Start Trip to Accident"}
                 </button>
 
                 <button
                   type="button"
                   className="secondary-action"
                   onClick={transportToHospital}
-                  disabled={busy || loading || !canTransport || !hasCoordinates}
+                  disabled={
+                    busy ||
+                    loading ||
+                    !canTransport ||
+                    !hasCoordinates
+                  }
                 >
                   Transport to Hospital
                 </button>
@@ -886,14 +1232,16 @@ export default function AmbulanceSimulation() {
             <div className="detail-row">
               <span>Route distance</span>
               <strong>
-                {routeInfo && routeInfo.distanceKm != null ? `${formatNumber(routeInfo.distanceKm)} km` : "—"}
+                {routeInfo?.distanceKm != null
+                  ? `${formatNumber(routeInfo.distanceKm)} km`
+                  : "—"}
               </strong>
             </div>
 
             <div className="detail-row">
               <span>Estimated road time</span>
               <strong>
-                {routeInfo && routeInfo.durationMinutes != null
+                {routeInfo?.durationMinutes != null
                   ? `${Math.ceil(routeInfo.durationMinutes)} min`
                   : "—"}
               </strong>
@@ -901,12 +1249,27 @@ export default function AmbulanceSimulation() {
 
             <div className="detail-row">
               <span>Position source</span>
-              <strong>{titleCase(tracking?.source || ambulance?.last_position?.source || (vehiclePosition ? "SIMULATION" : "NO POSITION"))}</strong>
+              <strong>
+                {titleCase(
+                  tracking?.source ||
+                    ambulance?.last_position?.source ||
+                    (vehiclePosition
+                      ? "SIMULATION"
+                      : "NO POSITION")
+                )}
+              </strong>
             </div>
 
             <div className="detail-row">
               <span>Route source</span>
-              <strong>{titleCase(routeInfo?.source || tracking?.return_route_source || tracking?.route_source || "NO SAVED ROUTE")}</strong>
+              <strong>
+                {titleCase(
+                  routeInfo?.source ||
+                    tracking?.return_route_source ||
+                    tracking?.route_source ||
+                    "NO SAVED ROUTE"
+                )}
+              </strong>
             </div>
 
             <div className="detail-row">
@@ -914,25 +1277,28 @@ export default function AmbulanceSimulation() {
               <strong>{progress}%</strong>
             </div>
 
-            <div className="progress-track">
+            <div
+              className="progress-track"
+              role="progressbar"
+              aria-label="Ambulance route progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={progress}
+            >
               <div
                 className="progress-fill"
                 style={{ width: `${progress}%` }}
               />
             </div>
-
-            <small>
-              Route time is the routing service's estimate, not live traffic
-              ETA.
-            </small>
           </section>
 
           <section className="side-panel">
-            <h2>Activity & Notifications</h2>
+            <h2>Activity &amp; Notifications</h2>
 
             {activity.length === 0 ? (
               <p className="empty-notifications">
-                No actions yet. Choose a dispatched assignment to begin.
+                No trip activity yet. Start a dispatched ambulance
+                trip to see updates here.
               </p>
             ) : (
               <ul className="notification-list">
@@ -948,12 +1314,6 @@ export default function AmbulanceSimulation() {
           </section>
         </aside>
       </main>
-
-      <footer className="ambulance-footer">
-        Academic project demonstration. This page reads real application
-        records and writes simulated trip positions to the backend; it does not
-        contact or dispatch a real emergency service.
-      </footer>
     </div>
   );
 }

@@ -1,789 +1,1172 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
 
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  CircleMarker,
+  MapContainer,
+  Marker,
+  Polyline,
+  Popup,
+  TileLayer,
+  useMap,
+} from "react-leaflet";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
+import "./AmbulanceSimulation.css";
 import { api } from "../api";
-import Loading from "../components/Loading";
-import ErrorMessage from "../components/ErrorMessage";
-import MapView from "../components/MapView";
-import { formatConfidence, formatDate } from "../utils";
 
-// ============================================================
-// DISTANCE HELPER
-// ============================================================
+const DEFAULT_CENTER = [18.5204, 73.8567];
+const ROUTE_STEPS = 24;
+const STEP_DELAY_MS = 700;
+const REFRESH_INTERVAL_MS = 5000;
 
-function distanceKm(lat1, lon1, lat2, lon2) {
-  const toRadians = (value) => (value * Math.PI) / 180;
-  const earthRadius = 6371;
+const toPoint = (value, depth = 0) => {
+  if (!value || typeof value !== "object" || depth > 5) return null;
 
-  const dLat = toRadians(lat2 - lat1);
-  const dLon = toRadians(lon2 - lon1);
+  if (value.type === "Feature" && value.geometry) {
+    return toPoint(value.geometry, depth + 1);
+  }
 
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRadians(lat1)) *
-      Math.cos(toRadians(lat2)) *
-      Math.sin(dLon / 2) ** 2;
+  if (
+    value.type === "Point" &&
+    Array.isArray(value.coordinates) &&
+    value.coordinates.length >= 2
+  ) {
+    const [longitude, latitude] = value.coordinates;
+    return toPoint({ latitude, longitude }, depth + 1);
+  }
 
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  if (
+    value.geometry?.type === "Point" &&
+    Array.isArray(value.geometry.coordinates)
+  ) {
+    return toPoint(value.geometry, depth + 1);
+  }
 
-  return earthRadius * c;
-}
+  if (Array.isArray(value.coordinates) && value.coordinates.length >= 2) {
+    const [longitude, latitude] = value.coordinates;
+    return toPoint({ latitude, longitude }, depth + 1);
+  }
 
-// ============================================================
-// STATUS HELPERS
-// ============================================================
+  if (Array.isArray(value) && value.length >= 2) {
+    return toPoint(
+      { latitude: value[0], longitude: value[1] },
+      depth + 1
+    );
+  }
 
-const TRACKING_STEPS = [
-  "RESPONSE_ACCEPTED",
-  "DISPATCHED",
-  "EN_ROUTE",
-  "ARRIVED",
-  "RESOLVED",
-];
+  for (const key of ["location", "gps", "position", "coordinates", "geometry"]) {
+    const nested = value[key];
 
-function statusLabel(status) {
-  const labels = {
-    RESPONSE_ACCEPTED: "Response Accepted",
-    DISPATCHED: "Ambulance Dispatched",
-    EN_ROUTE: "Ambulance En Route",
-    ARRIVED: "Ambulance Arrived",
-    RESOLVED: "Case Resolved",
-    REJECTED: "Rejected",
-    PENDING: "Pending",
-  };
-
-  return labels[status] || status || "Unknown";
-}
-
-function stepIndex(status) {
-  const index = TRACKING_STEPS.indexOf(status);
-  return index >= 0 ? index : 0;
-}
-
-function isActiveCase(status) {
-  return [
-    "RESPONSE_ACCEPTED",
-    "DISPATCHED",
-    "EN_ROUTE",
-    "ARRIVED",
-  ].includes(status);
-}
-
-// ============================================================
-// TRACKING COMPONENT
-// ============================================================
-
-function CaseTracking({ status }) {
-  const currentIndex = stepIndex(status);
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "flex-start",
-        gap: 0,
-        width: "100%",
-        marginTop: 18,
-        marginBottom: 6,
-      }}
-    >
-      {TRACKING_STEPS.map((step, index) => {
-        const completed = index < currentIndex;
-        const current = index === currentIndex;
-        const pending = index > currentIndex;
-
-        return (
-          <div
-            key={step}
-            style={{
-              flex: 1,
-              position: "relative",
-              minWidth: 0,
-            }}
-          >
-            {index < TRACKING_STEPS.length - 1 && (
-              <div
-                style={{
-                  position: "absolute",
-                  top: 11,
-                  left: "50%",
-                  width: "100%",
-                  height: 2,
-                  background:
-                    completed || current ? "#22c55e" : "#e5e7eb",
-                  zIndex: 0,
-                }}
-              />
-            )}
-
-            <div
-              style={{
-                position: "relative",
-                zIndex: 1,
-                display: "flex",
-                justifyContent: "center",
-              }}
-            >
-              <div
-                style={{
-                  width: 24,
-                  height: 24,
-                  borderRadius: "50%",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: 12,
-                  fontWeight: 800,
-                  background:
-                    completed || current ? "#22c55e" : "#ffffff",
-                  color:
-                    completed || current ? "#ffffff" : "#64748b",
-                  border: pending
-                    ? "2px solid #dbe1e8"
-                    : "2px solid #22c55e",
-                  boxSizing: "border-box",
-                }}
-              >
-                {completed ? "✓" : index + 1}
-              </div>
-            </div>
-
-            <div
-              style={{
-                textAlign: "center",
-                marginTop: 8,
-                padding: "0 3px",
-                fontSize: 10,
-                fontWeight: current ? 800 : 600,
-                color: current
-                  ? "#111827"
-                  : completed
-                    ? "#16a34a"
-                    : "#94a3b8",
-                lineHeight: 1.25,
-              }}
-            >
-              {statusLabel(step)}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ============================================================
-// MAIN HOSPITAL DASHBOARD
-// ============================================================
-
-export default function HospitalDashboard() {
-  const navigate = useNavigate();
-
-  const [hospital, setHospital] = useState(null);
-  const [alerts, setAlerts] = useState([]);
-  const [stats, setStats] = useState(null);
-  const [availableHospitals, setAvailableHospitals] = useState([]);
-  const [activeCases, setActiveCases] = useState([]);
-  const [mapIncidents, setMapIncidents] = useState([]);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
-
-  // ==========================================================
-  // LOAD PENDING ALERTS
-  // ==========================================================
-
-  async function loadPending() {
-    try {
-      const pending = await api.incidents.pending();
-
-      setAlerts(Array.isArray(pending) ? pending : []);
-    } catch (e) {
-      console.error("Pending incident poll failed:", e);
+    if (nested && nested !== value && typeof nested === "object") {
+      const point = toPoint(nested, depth + 1);
+      if (point) return point;
     }
   }
 
-  // ==========================================================
-  // LOAD INCIDENTS FOR THE MAP
-  // ==========================================================
+  const rawLatitude = value.latitude ?? value.lat;
+  const rawLongitude = value.longitude ?? value.lng ?? value.lon;
 
-  async function loadMapIncidents() {
-    try {
-      const data = await api.incidents.mapIncidents();
-
-      setMapIncidents(Array.isArray(data) ? data : []);
-    } catch (e) {
-      console.error("Map incidents loading failed:", e);
-    }
+  if (
+    rawLatitude === null ||
+    rawLatitude === undefined ||
+    rawLatitude === "" ||
+    rawLongitude === null ||
+    rawLongitude === undefined ||
+    rawLongitude === ""
+  ) {
+    return null;
   }
 
-  // ==========================================================
-  // LOAD ACTIVE ACCEPTED CASES
-  // ==========================================================
+  const latitude = Number(rawLatitude);
+  const longitude = Number(rawLongitude);
 
-  async function loadActiveCases() {
-    try {
-      const history = await api.incidents.history();
+  if (
+    !Number.isFinite(latitude) ||
+    !Number.isFinite(longitude) ||
+    latitude < -90 ||
+    latitude > 90 ||
+    longitude < -180 ||
+    longitude > 180 ||
+    (latitude === 0 && longitude === 0)
+  ) {
+    return null;
+  }
 
-      if (!Array.isArray(history)) {
-        setActiveCases([]);
-        return;
+  return { latitude, longitude };
+};
+
+// Saved route arrays use Leaflet order: [latitude, longitude].
+const toRouteCoordinates = (value) => {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((point) => {
+      if (Array.isArray(point) && point.length >= 2) {
+        const latitude = Number(point[0]);
+        const longitude = Number(point[1]);
+
+        if (
+          Number.isFinite(latitude) &&
+          Number.isFinite(longitude) &&
+          latitude >= -90 &&
+          latitude <= 90 &&
+          longitude >= -180 &&
+          longitude <= 180 &&
+          !(latitude === 0 && longitude === 0)
+        ) {
+          return [latitude, longitude];
+        }
+
+        return null;
       }
 
-      const detailedCases = await Promise.all(
-        history.map(async (record) => {
-          if (!record?.incident_id) {
-            return null;
-          }
+      const parsed = toPoint(point);
+      return parsed ? [parsed.latitude, parsed.longitude] : null;
+    })
+    .filter(Boolean);
+};
 
-          try {
-            const incident = await api.incidents.get(
-              record.incident_id
-            );
+const mapPosition = (point) =>
+  point ? [point.latitude, point.longitude] : null;
 
-            return {
-              ...record,
-              ...incident,
-            };
-          } catch (e) {
-            console.error(
-              "Could not load incident:",
-              record.incident_id,
-              e
-            );
+const formatNumber = (value, digits = 2) =>
+  value === null ||
+  value === undefined ||
+  value === "" ||
+  !Number.isFinite(Number(value))
+    ? "—"
+    : Number(value).toFixed(digits);
 
-            return { ...record };
-          }
-        })
-      );
+const titleCase = (value) =>
+  String(value || "UNKNOWN")
+    .replaceAll("_", " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 
-      const active = detailedCases
-        .filter(Boolean)
-        .filter((item) => isActiveCase(item.status));
+const hospitalIcon = L.divIcon({
+  className: "ambulance-map-icon",
+  html: '<div class="hospital-pin">H</div>',
+  iconSize: [32, 32],
+  iconAnchor: [16, 16],
+});
 
-      setActiveCases(active);
-    } catch (e) {
-      console.error("Active cases loading failed:", e);
-    }
-  }
+const accidentIcon = L.divIcon({
+  className: "ambulance-map-icon",
+  html: '<div class="accident-pin">!</div>',
+  iconSize: [34, 34],
+  iconAnchor: [17, 17],
+});
 
-  // ==========================================================
-  // FULL DASHBOARD LOAD
-  // ==========================================================
+const ambulanceIcon = L.divIcon({
+  className: "ambulance-map-icon",
+  html: '<div class="ambulance-pin">🚑</div>',
+  iconSize: [42, 42],
+  iconAnchor: [21, 21],
+});
 
-  async function loadDashboard() {
-    try {
-      setError("");
-
-      const [hospitalData, statsData, hospitalsData] =
-        await Promise.all([
-          api.hospitals.me(),
-          api.incidents.stats(),
-          api.hospitals.available(),
-        ]);
-
-      setHospital(hospitalData);
-      setStats(statsData);
-
-      setAvailableHospitals(
-        Array.isArray(hospitalsData) ? hospitalsData : []
-      );
-
-      await Promise.all([
-        loadPending(),
-        loadActiveCases(),
-        loadMapIncidents(),
-      ]);
-    } catch (e) {
-      setError(e?.message || "Failed to load hospital dashboard.");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  // ==========================================================
-  // POLLING
-  // ==========================================================
+function MapRecenter({ points }) {
+  const map = useMap();
 
   useEffect(() => {
-    let mounted = true;
+    const validPoints = points.filter(
+      (point) =>
+        Array.isArray(point) &&
+        point.length === 2 &&
+        point.every(Number.isFinite)
+    );
 
-    const safelyRun = async (callback) => {
-      if (!mounted) return;
+    if (!validPoints.length) return;
 
-      try {
-        await callback();
-      } catch (e) {
-        console.error("Dashboard polling failed:", e);
-      }
-    };
+    if (validPoints.length === 1) {
+      map.setView(validPoints[0], 14);
+    } else {
+      map.fitBounds(validPoints, {
+        padding: [35, 35],
+        maxZoom: 15,
+      });
+    }
+  }, [map, points]);
 
-    safelyRun(loadDashboard);
+  return null;
+}
 
-    const pendingTimer = setInterval(() => {
-      safelyRun(loadPending);
-    }, 1500);
+function delay(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
 
-    const activeCaseTimer = setInterval(() => {
-      safelyRun(loadActiveCases);
-    }, 3000);
+async function getRoadRoute(start, end) {
+  if (!start || !end) {
+    throw new Error(
+      "The assigned incident and hospital must both have valid coordinates."
+    );
+  }
 
-    const mapIncidentTimer = setInterval(() => {
-      safelyRun(loadMapIncidents);
-    }, 5000);
+  const url =
+    "https://router.project-osrm.org/route/v1/driving/" +
+    `${start.longitude},${start.latitude};` +
+    `${end.longitude},${end.latitude}` +
+    "?overview=full&geometries=geojson&steps=false";
 
-    const dashboardTimer = setInterval(() => {
-      safelyRun(loadDashboard);
-    }, 15000);
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    throw new Error("The road-routing service could not calculate a route.");
+  }
+
+  const data = await response.json();
+  const route = data.routes?.[0];
+
+  if (
+    data.code !== "Ok" ||
+    !route ||
+    !Array.isArray(route.geometry?.coordinates) ||
+    route.geometry.coordinates.length < 2
+  ) {
+    throw new Error(
+      "No road route was found for these coordinates. Check the saved locations."
+    );
+  }
+
+  return {
+    coordinates: route.geometry.coordinates.map(
+      ([longitude, latitude]) => [latitude, longitude]
+    ),
+    distanceKm: route.distance / 1000,
+    durationMinutes: route.duration / 60,
+    source: "OSRM",
+  };
+}
+
+function getAssignmentId(row) {
+  return row?.ambulance?.ambulance_id || "";
+}
+
+function getIncidentPoint(row) {
+  return toPoint(row?.incident?.location) || toPoint(row?.incident);
+}
+
+function getHospitalPoint(row) {
+  return toPoint(row?.hospital?.location) || toPoint(row?.hospital);
+}
+
+function getSavedRoute(tracking) {
+  const returning =
+    tracking?.phase === "TO_HOSPITAL" ||
+    tracking?.phase === "COMPLETED";
+
+  const savedCoordinates = returning
+    ? tracking?.return_route_coordinates || tracking?.route_coordinates
+    : tracking?.route_coordinates;
+
+  const coordinates = toRouteCoordinates(savedCoordinates);
+
+  if (coordinates.length < 2) return null;
+
+  const distanceValue = returning
+    ? tracking?.return_route_distance_km ?? tracking?.route_distance_km
+    : tracking?.route_distance_km;
+
+  const durationValue = returning
+    ? tracking?.return_route_duration_minutes ??
+      tracking?.route_duration_minutes
+    : tracking?.route_duration_minutes;
+
+  const distanceKm =
+    distanceValue == null || distanceValue === ""
+      ? null
+      : Number(distanceValue);
+
+  const durationMinutes =
+    durationValue == null || durationValue === ""
+      ? null
+      : Number(durationValue);
+
+  return {
+    coordinates,
+    distanceKm: Number.isFinite(distanceKm) ? distanceKm : null,
+    durationMinutes: Number.isFinite(durationMinutes)
+      ? durationMinutes
+      : null,
+    source: returning
+      ? tracking?.return_route_source || tracking?.route_source || "SAVED"
+      : tracking?.route_source || "SAVED",
+  };
+}
+
+export default function AmbulanceSimulation() {
+  const [assignments, setAssignments] = useState([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [backendConnected, setBackendConnected] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [routeCoordinates, setRouteCoordinates] = useState([]);
+  const [routeInfo, setRouteInfo] = useState(null);
+  const [vehiclePosition, setVehiclePosition] = useState(null);
+  const [progress, setProgress] = useState(0);
+  const [activity, setActivity] = useState([]);
+  const [hospitalReached, setHospitalReached] = useState(false);
+
+  const busyRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
+
+  useEffect(() => {
+    mountedRef.current = true;
 
     return () => {
-      mounted = false;
-
-      clearInterval(pendingTimer);
-      clearInterval(activeCaseTimer);
-      clearInterval(mapIncidentTimer);
-      clearInterval(dashboardTimer);
+      mountedRef.current = false;
     };
   }, []);
 
-  // ==========================================================
-  // ACTIVE INCIDENT
-  // ==========================================================
+  const applyAssignments = useCallback((response) => {
+    const rows = Array.isArray(response?.ambulances)
+      ? response.ambulances
+      : [];
 
-  const activeIncident = alerts.length > 0 ? alerts[0] : null;
+    setAssignments(rows);
 
-  // ==========================================================
-  // RECOMMENDED HOSPITAL
-  // ==========================================================
-
-  const recommendedHospital = useMemo(() => {
-    if (
-      !activeIncident ||
-      activeIncident.latitude == null ||
-      activeIncident.longitude == null
-    ) {
-      return null;
-    }
-
-    const incidentLat = Number(activeIncident.latitude);
-    const incidentLon = Number(activeIncident.longitude);
-
-    if (
-      !Number.isFinite(incidentLat) ||
-      !Number.isFinite(incidentLon)
-    ) {
-      return null;
-    }
-
-    const candidates = availableHospitals.filter((item) => {
-      if (item.latitude == null || item.longitude == null) {
-        return false;
+    setSelectedId((current) => {
+      if (current && rows.some((row) => getAssignmentId(row) === current)) {
+        return current;
       }
 
-      return (
-        Number.isFinite(Number(item.latitude)) &&
-        Number.isFinite(Number(item.longitude))
+      const assigned = rows.find(
+        (row) => row?.ambulance?.incident_id && row?.incident
       );
+
+      return getAssignmentId(assigned || rows[0]) || "";
     });
 
-    if (candidates.length === 0) {
-      return null;
-    }
+    return rows;
+  }, []);
 
-    let best = null;
-
-    for (const hospitalItem of candidates) {
-      const distance = distanceKm(
-        incidentLat,
-        incidentLon,
-        Number(hospitalItem.latitude),
-        Number(hospitalItem.longitude)
-      );
-
-      if (best === null || distance < best.distance) {
-        best = {
-          ...hospitalItem,
-          distance,
-        };
+  const loadAssignments = useCallback(
+    async (showLoading = true) => {
+      if (showLoading) {
+        setLoading(true);
+        setError("");
       }
-    }
 
-    return best;
-  }, [activeIncident, availableHospitals]);
+      try {
+        const response = await api.ambulanceSim.assignments();
 
-  // ==========================================================
-  // ACCEPT INCIDENT
-  // ==========================================================
+        if (!mountedRef.current) return [];
 
-  async function accept(incidentId) {
-    try {
-      setError("");
+        const rows = applyAssignments(response);
+        setBackendConnected(true);
+        return rows;
+      } catch (err) {
+        if (!mountedRef.current) return [];
 
-      await api.incidents.accept(incidentId);
+        setBackendConnected(false);
 
-      navigate(
-        `/hospital/incidents/${encodeURIComponent(incidentId)}`
+        if (showLoading) {
+          setError(
+            err?.message ||
+              "Could not load ambulance assignments. Check your Flask server and API connection."
+          );
+        }
+
+        console.error("Could not load ambulance assignments:", err);
+        return [];
+      } finally {
+        if (mountedRef.current && showLoading) {
+          setLoading(false);
+        }
+      }
+    },
+    [applyAssignments]
+  );
+
+  useEffect(() => {
+    loadAssignments();
+
+    const timer = window.setInterval(() => {
+      if (!busyRef.current && mountedRef.current) {
+        loadAssignments(false);
+      }
+    }, REFRESH_INTERVAL_MS);
+
+    return () => window.clearInterval(timer);
+  }, [loadAssignments]);
+
+  const selected = useMemo(
+    () =>
+      assignments.find((row) => getAssignmentId(row) === selectedId) || null,
+    [assignments, selectedId]
+  );
+
+  const ambulance = selected?.ambulance || null;
+  const incident = selected?.incident || null;
+  const hospital = selected?.hospital || null;
+
+  const incidentPoint = getIncidentPoint(selected);
+  const hospitalPoint = getHospitalPoint(selected);
+
+  const tracking =
+    incident?.tracking ||
+    incident?.ambulance_tracking ||
+    ambulance?.tracking ||
+    {};
+
+  const trackingPosition = toPoint(tracking?.position);
+
+  const ambulanceStoredPosition =
+    toPoint(ambulance?.last_position) ||
+    toPoint(ambulance?.current_position) ||
+    toPoint(ambulance?.location);
+
+  const currentPosition =
+    vehiclePosition || trackingPosition || ambulanceStoredPosition;
+
+  const mapPoints = useMemo(
+    () =>
+      [
+        mapPosition(incidentPoint),
+        mapPosition(hospitalPoint),
+        mapPosition(currentPosition),
+      ].filter(Boolean),
+    [
+      incidentPoint?.latitude,
+      incidentPoint?.longitude,
+      hospitalPoint?.latitude,
+      hospitalPoint?.longitude,
+      currentPosition?.latitude,
+      currentPosition?.longitude,
+    ]
+  );
+
+  // Restore route information for the selected assignment.
+  useEffect(() => {
+    if (busy) return;
+
+    const savedRoute = getSavedRoute(tracking);
+
+    if (savedRoute) {
+      setRouteCoordinates(savedRoute.coordinates);
+      setRouteInfo(savedRoute);
+
+      const savedProgress = Number(tracking?.progress);
+
+      setProgress(
+        Number.isFinite(savedProgress)
+          ? Math.max(0, Math.min(100, Math.round(savedProgress * 100)))
+          : 0
       );
-    } catch (e) {
-      setError(e?.message || "Could not accept the incident.");
+
+      setHospitalReached(
+        tracking?.phase === "TO_HOSPITAL" &&
+          Number.isFinite(savedProgress) &&
+          savedProgress >= 1
+      );
+    } else {
+      setRouteCoordinates([]);
+      setRouteInfo(null);
+      setProgress(0);
+      setHospitalReached(false);
     }
-  }
+  }, [
+    selectedId,
+    tracking?.phase,
+    tracking?.progress,
+    tracking?.route_coordinates,
+    tracking?.route_distance_km,
+    tracking?.route_duration_minutes,
+    tracking?.route_source,
+    tracking?.return_route_coordinates,
+    tracking?.return_route_distance_km,
+    tracking?.return_route_duration_minutes,
+    tracking?.return_route_source,
+    busy,
+  ]);
 
-  // ==========================================================
-  // REJECT INCIDENT
-  // ==========================================================
+  const addActivity = useCallback((text) => {
+    setActivity((items) =>
+      [
+        {
+          id: `${Date.now()}-${Math.random()}`,
+          text,
+          time: new Date().toLocaleTimeString(),
+        },
+        ...items,
+      ].slice(0, 8)
+    );
+  }, []);
 
-  async function reject(incidentId) {
+  const refreshAfterAction = useCallback(async () => {
+    const response = await api.ambulanceSim.assignments();
+
+    if (!mountedRef.current) return;
+
+    applyAssignments(response);
+    setBackendConnected(true);
+  }, [applyAssignments]);
+
+  // Simulate movement along the road route and persist each position.
+  const animateLeg = useCallback(
+    async ({ ambulanceId, route, phase }) => {
+      const coordinates = route.coordinates;
+      const total = coordinates.length;
+
+      if (total < 2) {
+        throw new Error("The selected road route has no usable coordinates.");
+      }
+
+      setRouteCoordinates(coordinates);
+      setRouteInfo(route);
+      setProgress(0);
+
+      const indices = Array.from(
+        new Set(
+          Array.from({ length: ROUTE_STEPS + 1 }, (_, index) =>
+            Math.round((index / ROUTE_STEPS) * (total - 1))
+          )
+        )
+      );
+
+      for (let step = 0; step < indices.length; step += 1) {
+        const index = indices[step];
+        const [latitude, longitude] = coordinates[index];
+        const fraction = index / Math.max(total - 1, 1);
+
+        setVehiclePosition({ latitude, longitude });
+        setProgress(Math.round(fraction * 100));
+
+        const distanceKm = Number(route.distanceKm);
+        const durationMinutes = Number(route.durationMinutes);
+
+        await api.ambulanceSim.position(ambulanceId, {
+          latitude,
+          longitude,
+          phase,
+          source: "SIMULATION",
+          progress: fraction,
+          speed_kmh: 25,
+          remaining_km: Number.isFinite(distanceKm)
+            ? distanceKm * (1 - fraction)
+            : null,
+          eta_seconds: Number.isFinite(durationMinutes)
+            ? durationMinutes * 60 * (1 - fraction)
+            : null,
+        });
+
+        if (step < indices.length - 1) {
+          await delay(STEP_DELAY_MS);
+        }
+      }
+
+      const [latitude, longitude] = coordinates[total - 1];
+
+      setVehiclePosition({ latitude, longitude });
+      setProgress(100);
+    },
+    []
+  );
+
+  const startTrip = async () => {
+    if (busy) return;
+
+    if (!selected || !ambulance?.ambulance_id) {
+      setError("Select an ambulance assignment first.");
+      return;
+    }
+
+    if (!incidentPoint || !hospitalPoint) {
+      setError(
+        "This assignment is missing valid incident or hospital coordinates."
+      );
+      return;
+    }
+
+    if (!["DISPATCHED", "EN_ROUTE"].includes(incident?.status)) {
+      setError(
+        `The trip cannot start from incident status ${
+          incident?.status || "UNKNOWN"
+        }. Dispatch the ambulance first.`
+      );
+      return;
+    }
+
+    if (
+      tracking?.phase === "TO_SCENE" ||
+      tracking?.phase === "TO_HOSPITAL"
+    ) {
+      setError("A trip is already in progress.");
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    setMessage("");
+    setHospitalReached(false);
+
     try {
-      setError("");
+      const route = await getRoadRoute(hospitalPoint, incidentPoint);
 
-      await api.incidents.reject(incidentId);
+      await api.ambulanceSim.start(ambulance.ambulance_id, {
+        source: "SIMULATION",
+        route_source: "OSRM",
+        route_coordinates: route.coordinates,
+        route_distance_km: route.distanceKm,
+        route_duration_minutes: route.durationMinutes,
+      });
 
-      await Promise.all([
-        loadPending(),
-        loadMapIncidents(),
-      ]);
-    } catch (e) {
-      setError(e?.message || "Could not reject the incident.");
+      setVehiclePosition(hospitalPoint);
+
+      addActivity(
+        `${ambulance.ambulance_id} started toward incident ${incident.incident_id}.`
+      );
+
+      await animateLeg({
+        ambulanceId: ambulance.ambulance_id,
+        route,
+        phase: "TO_SCENE",
+      });
+
+      await api.ambulanceSim.arriveScene(ambulance.ambulance_id);
+
+      setVehiclePosition(incidentPoint);
+      setMessage("Ambulance arrived at the accident scene.");
+      addActivity(`Ambulance arrived at ${incident.incident_id}.`);
+
+      await refreshAfterAction();
+    } catch (err) {
+      setError(
+        err?.message || "Could not complete the trip to the accident."
+      );
+
+      await refreshAfterAction().catch(() => {});
+    } finally {
+      setBusy(false);
     }
-  }
+  };
 
-  // ==========================================================
-  // LOADING
-  // ==========================================================
+  const transportToHospital = async () => {
+    if (busy) return;
 
-  if (loading) {
-    return <Loading label="Loading emergency dashboard..." />;
-  }
+    if (!selected || !ambulance?.ambulance_id) {
+      setError("Select an ambulance assignment first.");
+      return;
+    }
 
-  // ==========================================================
-  // DASHBOARD UI
-  // ==========================================================
+    if (!incidentPoint || !hospitalPoint) {
+      setError("The incident or hospital coordinates are missing.");
+      return;
+    }
+
+    if (incident?.status !== "ARRIVED") {
+      setError(
+        "Transport can start after the ambulance reaches the accident scene."
+      );
+      return;
+    }
+
+    if (tracking?.phase === "TO_HOSPITAL") {
+      setError("Hospital transport has already started.");
+      return;
+    }
+
+    if (tracking?.phase === "COMPLETED") {
+      setError("This trip is already completed.");
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    setMessage("");
+    setHospitalReached(false);
+
+    try {
+      const route = await getRoadRoute(incidentPoint, hospitalPoint);
+
+      await api.ambulanceSim.departScene(ambulance.ambulance_id, {
+        route_source: "OSRM",
+        route_coordinates: route.coordinates,
+        route_distance_km: route.distanceKm,
+        route_duration_minutes: route.durationMinutes,
+      });
+
+      setVehiclePosition(incidentPoint);
+
+      addActivity(
+        `Transport started from incident ${incident.incident_id} to ${
+          hospital?.name || "the assigned hospital"
+        }.`
+      );
+
+      await animateLeg({
+        ambulanceId: ambulance.ambulance_id,
+        route,
+        phase: "TO_HOSPITAL",
+      });
+
+      setVehiclePosition(hospitalPoint);
+      setHospitalReached(true);
+
+      setMessage(
+        "The ambulance reached the hospital. Complete the trip to release the ambulance."
+      );
+
+      addActivity(
+        `Ambulance reached ${hospital?.name || "the assigned hospital"}.`
+      );
+
+      await refreshAfterAction();
+    } catch (err) {
+      setError(err?.message || "Could not complete hospital transport.");
+      await refreshAfterAction().catch(() => {});
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const completeTrip = async () => {
+    if (busy) return;
+
+    if (!ambulance?.ambulance_id) {
+      setError("No ambulance is selected.");
+      return;
+    }
+
+    if (!hospitalReached) {
+      setError("Reach the hospital before completing the trip.");
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    setMessage("");
+
+    try {
+      await api.ambulanceSim.complete(ambulance.ambulance_id);
+
+      setMessage("Trip completed. The ambulance is now available.");
+      addActivity(
+        `Trip completed for ${incident?.incident_id || "incident"}.`
+      );
+
+      setProgress(100);
+      setHospitalReached(false);
+
+      await refreshAfterAction();
+    } catch (err) {
+      setError(err?.message || "Could not complete the ambulance trip.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const incidentStatus = incident?.status || "NO ACTIVE INCIDENT";
+  const ambulanceStatus = ambulance?.status || "UNKNOWN";
+  const phase = tracking?.phase || "NOT STARTED";
+  const severity = incident?.severity?.level ?? incident?.severity;
+
+  const canStart =
+    !!ambulance?.ambulance_id &&
+    ["DISPATCHED", "EN_ROUTE"].includes(incident?.status) &&
+    !["TO_SCENE", "TO_HOSPITAL", "COMPLETED"].includes(phase);
+
+  const canTransport =
+    incident?.status === "ARRIVED" &&
+    phase !== "TO_HOSPITAL" &&
+    phase !== "COMPLETED";
+
+  const canComplete =
+    incident?.status === "ARRIVED" &&
+    phase === "TO_HOSPITAL" &&
+    hospitalReached;
+
+  const hasCoordinates = !!incidentPoint && !!hospitalPoint;
+  const trackingPoint = toPoint(tracking?.position);
 
   return (
-    <section>
-      {/* PAGE HEADER */}
-
-      <div className="page-heading">
+    <div className="ambulance-page">
+      <header className="ambulance-header">
         <div>
-          <span className="eyebrow">LIVE ACCIDENT QUEUE</span>
-
-          <h2>Upcoming accidents</h2>
-
-          <p>
-            Accident alerts are sent directly from the live
-            detection service.
-          </p>
+          <div className="ambulance-eyebrow">EMERGENCY RESPONSE SYSTEM</div>
+          <h1>Ambulance Command Center</h1>
         </div>
 
-        <span
-          className={`availability-chip ${
-            hospital?.emergency_available ? "on" : "off"
-          }`}
-        >
-          {hospital?.emergency_available
-            ? "AVAILABLE"
-            : "UNAVAILABLE"}
-        </span>
-      </div>
-
-      <ErrorMessage message={error} />
-
-      {/* STATS */}
-
-      <div className="stats-grid">
-        <div className="stat-card danger">
-          <span className="stat-label">Live alerts</span>
-          <strong className="stat-value">{alerts.length}</strong>
-          <span className="stat-detail">
-            Pending hospital response
-          </span>
+        <div className="ambulance-live-status">
+          <span className="status-dot" />
+          {loading
+            ? "LOADING DATA"
+            : !backendConnected
+              ? "BACKEND UNAVAILABLE"
+              : assignments.length === 0
+                ? "CONNECTED · NO RECORDS"
+                : "CONNECTED · LIVE UPDATES"}
         </div>
+      </header>
 
-        <div className="stat-card">
-          <span className="stat-label">Active responses</span>
-          <strong className="stat-value">
-            {activeCases.length}
-          </strong>
-          <span className="stat-detail">
-            Accepted cases in progress
-          </span>
-        </div>
+      <section className="ambulance-stats">
+        <article className="ambulance-stat">
+          <span>Ambulance ID</span>
+          <strong>{ambulance?.ambulance_id || "—"}</strong>
+        </article>
 
-        <div className="stat-card">
-          <span className="stat-label">Attended this month</span>
-          <strong className="stat-value">
-            {stats?.attended_this_month ?? 0}
-          </strong>
-          <span className="stat-detail">Your hospital</span>
-        </div>
+        <article className="ambulance-stat">
+          <span>Incident ID</span>
+          <strong>{incident?.incident_id || "No assignment"}</strong>
+        </article>
 
-        <div className="stat-card">
-          <span className="stat-label">Ambulances</span>
-          <strong className="stat-value">
-            {(hospital?.resources?.small_ambulances ?? 0) +
-              (hospital?.resources?.large_ambulances ?? 0)}
-          </strong>
-          <span className="stat-detail">Small + large</span>
-        </div>
-      </div>
+        <article className="ambulance-stat">
+          <span>Severity</span>
+          <strong className="severity-high">{titleCase(severity)}</strong>
+        </article>
 
-      {/* ACTIVE RESPONSE CASES */}
+        <article className="ambulance-stat">
+          <span>Ambulance status</span>
+          <strong>{titleCase(ambulanceStatus)}</strong>
+        </article>
+      </section>
 
-      <div className="panel">
-        <div className="panel-heading">
-          <div>
-            <span className="eyebrow">ACTIVE RESPONSE CASES</span>
-
-            <h3>Accepted requests</h3>
-
-            <p>
-              Track every case your hospital has accepted until
-              the ambulance arrives and the incident is resolved.
-            </p>
-          </div>
-        </div>
-
-        {activeCases.length === 0 ? (
-          <div className="empty-state">
-            <strong>No active response cases</strong>
-            <span>
-              Accepted emergency requests will appear here.
-            </span>
-          </div>
-        ) : (
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: 14,
-            }}
+      {error && (
+        <div className="side-panel" role="alert">
+          <strong>Action needed</strong>
+          <p>{error}</p>
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={() => setError("")}
           >
-            {activeCases.map((incident) => (
-              <div
-                key={incident.incident_id}
-                style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: 14,
-                  padding: 18,
-                  background: "#ffffff",
-                }}
-              >
-                {/* CASE HEADER */}
-
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    gap: 16,
-                    flexWrap: "wrap",
-                  }}
-                >
-                  <div>
-                    <span className="alert-label">
-                      ACCEPTED CASE
-                    </span>
-
-                    <h3 style={{ margin: "5px 0 4px" }}>
-                      {incident.incident_id}
-                    </h3>
-
-                    <p style={{ margin: 0 }}>
-                      Accepted{" "}
-                      {incident.accepted_at
-                        ? formatDate(incident.accepted_at)
-                        : "recently"}
-                    </p>
-                  </div>
-
-                  <div style={{ textAlign: "right" }}>
-                    <div
-                      style={{
-                        fontSize: 11,
-                        fontWeight: 700,
-                        color: "#64748b",
-                        textTransform: "uppercase",
-                        letterSpacing: "0.06em",
-                      }}
-                    >
-                      Current status
-                    </div>
-
-                    <div
-                      style={{
-                        marginTop: 5,
-                        fontWeight: 800,
-                        color: "#111827",
-                      }}
-                    >
-                      {statusLabel(incident.status)}
-                    </div>
-                  </div>
-                </div>
-
-                {/* METRICS */}
-
-                <div
-                  className="alert-metrics"
-                  style={{ marginTop: 16 }}
-                >
-                  <div>
-                    <span>Confidence</span>
-                    <strong>
-                      {formatConfidence(incident.confidence)}
-                    </strong>
-                  </div>
-
-                  <div>
-                    <span>Severity</span>
-                    <strong>
-                      {incident.severity?.level || "UNKNOWN"}
-                    </strong>
-                  </div>
-
-                  <div>
-                    <span>Camera</span>
-                    <strong>{incident.camera_id || "—"}</strong>
-                  </div>
-
-                  <div>
-                    <span>Ambulance</span>
-                    <strong>
-                      {incident.ambulance_type || "Not dispatched"}
-                    </strong>
-                  </div>
-                </div>
-
-                {/* TRACKING TIMELINE */}
-
-                <CaseTracking
-                  status={incident.status || "RESPONSE_ACCEPTED"}
-                />
-
-                {/* ACTIONS */}
-
-                <div
-                  className="button-row"
-                  style={{ marginTop: 20 }}
-                >
-                  <Link
-                    className="button primary"
-                    to={`/hospital/incidents/${encodeURIComponent(
-                      incident.incident_id
-                    )}`}
-                  >
-                    TRACK CASE
-                  </Link>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* EMERGENCY MAP */}
-
-      <div className="panel">
-        <div className="panel-heading">
-          <div>
-            <span className="eyebrow">EMERGENCY LOCATION</span>
-
-            <h3>Accident and hospital network</h3>
-
-            <p>
-              {recommendedHospital
-                ? `Nearest available hospital: ${
-                    recommendedHospital.name || "Hospital"
-                  } (${recommendedHospital.distance.toFixed(2)} km straight-line distance)`
-                : "Incident and hospital locations appear when valid coordinates are available."}
-            </p>
-          </div>
+            Dismiss
+          </button>
         </div>
+      )}
 
-        <MapView
-          incidents={mapIncidents}
-          hospitals={availableHospitals}
-          activeIncident={activeIncident}
-          recommendedHospital={recommendedHospital}
-          height={420}
-        />
-      </div>
+      {message && (
+        <div className="side-panel" role="status">
+          {message}
+        </div>
+      )}
 
-      {/* PENDING ALERT QUEUE */}
-
-      <div className="alert-list">
-        {alerts.length === 0 ? (
-          <div className="panel empty-state large">
-            <strong>No pending accident alerts</strong>
-            <span>
-              New alerts will appear automatically.
-            </span>
-          </div>
-        ) : (
-          alerts.map((incident) => (
-            <div
-              className="alert-card"
-              key={incident.incident_id}
-            >
-              <div>
-                <span className="alert-label">NEW ACCIDENT</span>
-
-                <h3>{incident.incident_id}</h3>
-
-                <p>{formatDate(incident.timestamp)}</p>
-              </div>
-
-              <div className="alert-metrics">
-                <div>
-                  <span>Confidence</span>
-                  <strong>
-                    {formatConfidence(incident.confidence)}
-                  </strong>
-                </div>
-
-                <div>
-                  <span>Severity</span>
-                  <strong>
-                    {incident.severity?.level || "UNKNOWN"}
-                  </strong>
-                </div>
-
-                <div>
-                  <span>Camera</span>
-                  <strong>{incident.camera_id || "—"}</strong>
-                </div>
-              </div>
-
-              <div className="button-row">
-                <Link
-                  className="button secondary"
-                  to={`/hospital/incidents/${encodeURIComponent(
-                    incident.incident_id
-                  )}`}
-                >
-                  Review
-                </Link>
-
-                <button
-                  type="button"
-                  className="button primary"
-                  onClick={() => accept(incident.incident_id)}
-                >
-                  ACCEPT FIRST
-                </button>
-
-                <button
-                  type="button"
-                  className="button danger"
-                  onClick={() => reject(incident.incident_id)}
-                >
-                  Reject
-                </button>
-              </div>
+      <main className="ambulance-layout">
+        <section className="map-panel">
+          <div className="panel-heading">
+            <div>
+              <h2>Ambulance Tracking Map</h2>
             </div>
-          ))
-        )}
-      </div>
-    </section>
+
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => loadAssignments()}
+              disabled={loading || busy}
+            >
+              {loading ? "Refreshing..." : "Refresh Data"}
+            </button>
+          </div>
+
+          <div
+            className="ambulance-map"
+            style={{ height: 480, width: "100%" }}
+          >
+            <MapContainer
+              center={DEFAULT_CENTER}
+              zoom={12}
+              scrollWheelZoom
+              style={{ height: "100%", width: "100%" }}
+            >
+              <TileLayer
+                attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+              />
+
+              <MapRecenter points={mapPoints} />
+
+              {incidentPoint && (
+                <Marker
+                  position={mapPosition(incidentPoint)}
+                  icon={accidentIcon}
+                >
+                  <Popup>
+                    <strong>
+                      Accident: {incident?.incident_id || "Unknown"}
+                    </strong>
+                    <br />
+                    Severity: {titleCase(severity)}
+                    <br />
+                    Status: {titleCase(incident?.status)}
+                    <br />
+                    {incidentPoint.latitude}, {incidentPoint.longitude}
+                  </Popup>
+                </Marker>
+              )}
+
+              {hospitalPoint && (
+                <Marker
+                  position={mapPosition(hospitalPoint)}
+                  icon={hospitalIcon}
+                >
+                  <Popup>
+                    <strong>{hospital?.name || "Assigned hospital"}</strong>
+                    <br />
+                    Hospital ID: {hospital?.hospital_id || "—"}
+                    <br />
+                    {hospitalPoint.latitude}, {hospitalPoint.longitude}
+                  </Popup>
+                </Marker>
+              )}
+
+              {routeCoordinates.length >= 2 && (
+                <Polyline
+                  positions={routeCoordinates}
+                  pathOptions={{
+                    color: "#2563eb",
+                    weight: 5,
+                    opacity: 0.85,
+                  }}
+                />
+              )}
+
+              {currentPosition && (
+                <Marker
+                  position={mapPosition(currentPosition)}
+                  icon={ambulanceIcon}
+                >
+                  <Popup>
+                    <strong>{ambulance?.ambulance_id || "Ambulance"}</strong>
+                    <br />
+                    Status: {titleCase(ambulanceStatus)}
+                    <br />
+                    Phase: {titleCase(phase)}
+                    <br />
+                    {currentPosition.latitude}, {currentPosition.longitude}
+                  </Popup>
+                </Marker>
+              )}
+
+              {trackingPoint && (
+                <CircleMarker
+                  center={mapPosition(trackingPoint)}
+                  radius={5}
+                  pathOptions={{ color: "#15803d", fillOpacity: 0.7 }}
+                >
+                  <Popup>Latest position saved by the backend</Popup>
+                </CircleMarker>
+              )}
+            </MapContainer>
+          </div>
+
+
+          {!incidentPoint && !hospitalPoint && !currentPosition && (
+            <p className="empty-notifications">
+             
+            </p>
+          )}
+
+        </section>
+
+        <aside className="ambulance-sidebar">
+          <section className="side-panel">
+            <h2>Ambulance Assignments</h2>
+
+            {loading ? (
+              <p>Loading assignments from the backend…</p>
+            ) : assignments.length === 0 ? (
+              <p className="empty-notifications">
+                No ambulance records were returned. Register an ambulance and
+                dispatch it to an incident first.
+              </p>
+            ) : (
+              <label className="assignment-select-label">
+                Select ambulance
+                <select
+                  value={selectedId}
+                  onChange={(event) => {
+                    setSelectedId(event.target.value);
+                    setRouteCoordinates([]);
+                    setRouteInfo(null);
+                    setVehiclePosition(null);
+                    setProgress(0);
+                    setHospitalReached(false);
+                    setError("");
+                    setMessage("");
+                  }}
+                  disabled={busy}
+                >
+                  {assignments.map((row, index) => {
+                    const id = getAssignmentId(row);
+
+                    return (
+                      <option
+                        key={id || `assignment-${index}`}
+                        value={id}
+                      >
+                        {id || "Unnamed ambulance"} —{" "}
+                        {row?.incident?.incident_id || "Unassigned"} (
+                        {titleCase(row?.ambulance?.status)})
+                      </option>
+                    );
+                  })}
+                </select>
+              </label>
+            )}
+
+            {selected && (
+              <>
+                <div className="selected-hospital-summary">
+                  <span>Assigned incident</span>
+                  <strong>{incident?.incident_id || "No incident"}</strong>
+                  <p>Status: {titleCase(incidentStatus)}</p>
+                  <small>
+                    Severity: {titleCase(severity)} · Camera:{" "}
+                    {incident?.camera_id || "—"}
+                  </small>
+                </div>
+
+                <div className="selected-hospital-summary">
+                  <span>Destination hospital</span>
+                  <strong>{hospital?.name || "No hospital assigned"}</strong>
+                  <p>Hospital ID: {hospital?.hospital_id || "—"}</p>
+                  <small>
+                    {hospitalPoint
+                      ? `${hospitalPoint.latitude}, ${hospitalPoint.longitude}`
+                      : "Hospital coordinates are missing"}
+                  </small>
+                </div>
+
+                {!hasCoordinates && (
+                  <p role="alert">
+                    This assignment cannot be routed until both the incident
+                    and hospital have valid coordinates.
+                  </p>
+                )}
+
+                <button
+                  type="button"
+                  className="primary-action"
+                  onClick={startTrip}
+                  disabled={busy || loading || !canStart || !hasCoordinates}
+                >
+                  {busy ? "Processing trip…" : "Start Trip to Accident"}
+                </button>
+
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={transportToHospital}
+                  disabled={
+                    busy || loading || !canTransport || !hasCoordinates
+                  }
+                >
+                  Transport to Hospital
+                </button>
+
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={completeTrip}
+                  disabled={busy || loading || !canComplete}
+                >
+                  Complete Trip
+                </button>
+              </>
+            )}
+          </section>
+
+          <section className="side-panel incident-panel">
+            <h2>Trip Details</h2>
+
+            <div className="detail-row">
+              <span>Incident status</span>
+              <strong>{titleCase(incidentStatus)}</strong>
+            </div>
+
+            <div className="detail-row">
+              <span>Tracking phase</span>
+              <strong>{titleCase(phase)}</strong>
+            </div>
+
+            <div className="detail-row">
+              <span>Route distance</span>
+              <strong>
+                {routeInfo?.distanceKm != null
+                  ? `${formatNumber(routeInfo.distanceKm)} km`
+                  : "—"}
+              </strong>
+            </div>
+
+            <div className="detail-row">
+              <span>Estimated road time</span>
+              <strong>
+                {routeInfo?.durationMinutes != null
+                  ? `${Math.ceil(routeInfo.durationMinutes)} min`
+                  : "—"}
+              </strong>
+            </div>
+
+            <div className="detail-row">
+              <span>Position source</span>
+              <strong>
+                {titleCase(
+                  tracking?.source ||
+                    ambulance?.last_position?.source ||
+                    (vehiclePosition ? "SIMULATION" : "NO POSITION")
+                )}
+              </strong>
+            </div>
+
+            <div className="detail-row">
+              <span>Route source</span>
+              <strong>
+                {titleCase(
+                  routeInfo?.source ||
+                    tracking?.return_route_source ||
+                    tracking?.route_source ||
+                    "NO SAVED ROUTE"
+                )}
+              </strong>
+            </div>
+
+            <div className="detail-row">
+              <span>Route progress</span>
+              <strong>{progress}%</strong>
+            </div>
+
+            <div
+              className="progress-track"
+              role="progressbar"
+              aria-label="Ambulance route progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={progress}
+            >
+              <div
+                className="progress-fill"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+          </section>
+
+          <section className="side-panel">
+            <h2>Activity &amp; Notifications</h2>
+
+            {activity.length === 0 ? (
+              <p className="empty-notifications">
+                No trip activity yet. Start a dispatched ambulance trip to see
+                updates here.
+              </p>
+            ) : (
+              <ul className="notification-list">
+                {activity.map((item) => (
+                  <li key={item.id}>
+                    <strong>{item.time}</strong>
+                    <br />
+                    {item.text}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </aside>
+      </main>
+    </div>
   );
 }
