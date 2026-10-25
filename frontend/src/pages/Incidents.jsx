@@ -99,6 +99,8 @@ export default function IncidentDetails() {
 
   useEffect(() => {
     loadIncident();
+    const refreshTimer = window.setInterval(loadIncident, 5000);
+    return () => window.clearInterval(refreshTimer);
   }, [id]);
 
 

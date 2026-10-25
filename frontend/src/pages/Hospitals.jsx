@@ -24,6 +24,8 @@ export default function Hospitals() {
 
   useEffect(() => {
     load();
+    const refreshTimer = window.setInterval(load, 5000);
+    return () => window.clearInterval(refreshTimer);
   }, []);
 
   async function createFacility(e) {
@@ -41,8 +43,10 @@ export default function Hospitals() {
 
   async function toggle(hospital) {
     try {
+      const emergencyAvailable = !hospital.emergency_available;
       await api.hospitals.updateAvailability(hospital.hospital_id, {
-        emergency_available: !hospital.emergency_available,
+        emergency_available: emergencyAvailable,
+        status: emergencyAvailable && hospital.staff_available ? "AVAILABLE" : "UNAVAILABLE",
       });
       await load();
     } catch (err) {
@@ -62,6 +66,9 @@ export default function Hospitals() {
         </div>
       </div>
 
+      <p className="muted-text" style={{ marginBottom: 12 }}>
+        Availability shown here comes from the records maintained in this system; it is not a live connection to hospital dispatch systems. Verify each facility's contact, coordinates, staffing and emergency status before using it for a real response.
+      </p>
       <ErrorMessage message={error} />
       {notice && <p className="success-message">{notice}</p>}
 
@@ -97,6 +104,9 @@ export default function Hospitals() {
 
               <h3>{hospital.name}</h3>
               <p>{hospital.contact}</p>
+              {(hospital.data_source === "DEMO" || String(hospital.name || "").includes("(DEMO)") || String(hospital.contact || "").includes("DEMO ONLY")) && (
+                <p className="muted-text"><strong>DEMO RECORD — replace with verified facility data</strong></p>
+              )}
               <p className="muted-text">{hospital.facility_type || "HOSPITAL"} · {(hospital.capabilities || ["FIRST_AID", "EMERGENCY", "TRAUMA"]).join(", ")}</p>
 
               <div className="detail-list compact">

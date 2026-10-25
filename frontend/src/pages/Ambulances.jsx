@@ -20,7 +20,11 @@ export default function Ambulances() {
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   }
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    const refreshTimer = window.setInterval(load, 5000);
+    return () => window.clearInterval(refreshTimer);
+  }, []);
   async function register(e) {
     e.preventDefault(); setError(""); setNotice("");
     try { await api.ambulances.register(form); setForm({ ambulance_id: "", hospital_id: "", vehicle_type: "BLS", plate_number: "" }); setNotice("Ambulance registered."); await load(); }

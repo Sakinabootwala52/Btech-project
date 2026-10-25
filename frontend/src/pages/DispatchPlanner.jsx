@@ -41,7 +41,25 @@ export default function DispatchPlanner() {
     finally { setLoading(false); }
   }
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    const refreshTimer = window.setInterval(async () => {
+      try {
+        const rows = await api.incidents.list();
+        const currentRows = Array.isArray(rows) ? rows : [];
+        setIncidents(currentRows);
+        setIncidentId((current) =>
+          currentRows.some((row) => row.incident_id === current)
+            ? current
+            : (currentRows[0]?.incident_id || "")
+        );
+      } catch (e) {
+        // Keep the last successful snapshot visible if a transient poll fails.
+        console.warn("Could not refresh dispatch incidents:", e);
+      }
+    }, 5000);
+    return () => window.clearInterval(refreshTimer);
+  }, []);
 
   async function rank() {
     if (!incidentId) return;

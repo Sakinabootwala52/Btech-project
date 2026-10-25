@@ -78,11 +78,18 @@ export default function AdminDashboard() {
       }
     }
 
-    loadDashboard();
+   loadDashboard();
 
-    return () => {
-      cancelled = true;
-    };
+const refreshId = window.setInterval(
+  loadDashboard,
+  5000
+);
+
+return () => {
+  cancelled = true;
+  window.clearInterval(refreshId);
+};
+
   }, [month]);
 
   if (!data && !error) {
@@ -154,7 +161,7 @@ export default function AdminDashboard() {
   // HOTSPOTS FOR THE EXISTING MAP
   // ==========================================================
 
-  const hotspotIncidents = (data?.hotspots || [])
+const hotspotIncidents = incidents
     .filter(
       (hotspot) =>
         hotspot?.latitude != null &&
@@ -418,7 +425,7 @@ export default function AdminDashboard() {
 
             {/* Reuse the existing map; do not create another map */}
             <MapView
-              incidents={hotspotIncidents}
+              incidents={incidents}
               hospitals={hospitalsForMap}
               activeIncident={selectedIncident}
               recommendedHospital={recommendedHospital}

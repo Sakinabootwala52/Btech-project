@@ -2,12 +2,13 @@ import json
 import subprocess
 import uuid
 from pathlib import Path
+from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify, request, session
 from pymongo import ReturnDocument
 
 from config import Config
-from database.mongo import incidents_collection
+from database.mongo import incidents_collection, cameras_collection
 from services.incident_service import (
     create_incident_from_detection,
 )
@@ -164,13 +165,10 @@ def build_payload(
     payload["camera_id"] = (
         stream["camera_id"]
     )
-
-    payload["timestamp"] = (
-        event.get(
-            "timestamp_seconds",
-            0,
-        )
+    payload["video_timestamp_seconds"] = event.get(
+    "timestamp_seconds"
     )
+    payload["timestamp"] = datetime.now(timezone.utc).isoformat()
 
     return payload
 
@@ -720,7 +718,18 @@ def start_stream():
         ).strip()
         or "CAM_001"
     )
-
+    camera = cameras_collection().find_one(
+    {"camera_id": camera_id}
+)
+    if camera is None:
+        return jsonify({
+        "error": "CAMERA_NOT_FOUND",
+        "message": (
+            f"Camera '{camera_id}' is not registered. "
+            "Add it in Camera Management first."
+        ),
+    }), 400
+    
     source_name = (
         str(
             data.get(

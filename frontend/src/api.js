@@ -206,6 +206,12 @@ export const api = {
       request(
         "/hospitals/available"
       ),
+
+    updateAvailability: (hospitalId, data) =>
+      request(`/hospitals/${encodeURIComponent(hospitalId)}/availability`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      }),
   },
 
 

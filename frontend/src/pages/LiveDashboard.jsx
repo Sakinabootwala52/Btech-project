@@ -10,6 +10,8 @@ const SAMPLE_VIDEOS = Array.from(
 export default function LiveDashboard() {
   const [cameraId, setCameraId] = useState("CAM_001");
   const [source, setSource] = useState("clip_01.mp4");
+  const [cameras, setCameras] = useState([]);
+  const [cameraLoadError, setCameraLoadError] = useState("");
 
   const [streamId, setStreamId] = useState(null);
   const [streamStatus, setStreamStatus] = useState("idle");
@@ -186,7 +188,31 @@ export default function LiveDashboard() {
   }
 
   useEffect(() => {
+    let cancelled = false;
+
+    async function loadCameras() {
+      try {
+        const rows = await api.cameras.list();
+        if (cancelled) return;
+        const configured = Array.isArray(rows) ? rows : [];
+        setCameras(configured);
+        setCameraLoadError("");
+        setCameraId((current) =>
+          configured.some((camera) => camera.camera_id === current)
+            ? current
+            : (configured[0]?.camera_id || "")
+        );
+      } catch (err) {
+        if (!cancelled) setCameraLoadError(err.message || "Could not load configured cameras.");
+      }
+    }
+
+    loadCameras();
+    const cameraRefresh = window.setInterval(loadCameras, 5000);
+
     return () => {
+      cancelled = true;
+      window.clearInterval(cameraRefresh);
       clearPolling();
     };
   }, []);
@@ -232,6 +258,43 @@ export default function LiveDashboard() {
           <span>{error}</span>
         </div>
       )}
+      {cameraLoadError && (
+        <div className="error-message"><span>{cameraLoadError}</span></div>
+      )}
+
+      <div className="panel" style={{ marginBottom: 20 }}>
+        <div className="panel-header">
+          <div>
+            <h3>Configured cameras ({cameras.length})</h3>
+            <span>Loaded from the cameras collection in MongoDB. Demo video sources are labelled as simulated.</span>
+          </div>
+        </div>
+        {cameras.length === 0 ? (
+          <p>No cameras are configured in MongoDB. Run `python seed.py` in the backend for four local demo cameras, or register camera records.</p>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12 }}>
+            {cameras.map((camera) => (
+              <button
+                type="button"
+                key={camera.camera_id}
+                className="panel"
+                onClick={() => {
+                  if (!isRunning) {
+                    setCameraId(camera.camera_id);
+                    if (camera.stream_url && SAMPLE_VIDEOS.includes(camera.stream_url)) setSource(camera.stream_url);
+                  }
+                }}
+                style={{ textAlign: "left", cursor: isRunning ? "default" : "pointer", border: cameraId === camera.camera_id ? "2px solid var(--accent, #16a34a)" : undefined }}
+              >
+                <strong>{camera.name || camera.camera_id}</strong>
+                <div>{camera.camera_id} · {camera.status || "UNKNOWN"}</div>
+                <small>{camera.location_name || "Location not set"}</small>
+                <div><small>{camera.source_type === "SIMULATED_VIDEO" ? "SIMULATED VIDEO" : (camera.source_type || "CONFIGURED SOURCE")}</small></div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* -------------------------------------------------- */}
       {/* STREAM CONTROLS                                   */}
@@ -258,15 +321,18 @@ export default function LiveDashboard() {
           <label>
             Camera ID
 
-            <input
+            <select
               value={cameraId}
-              onChange={(e) =>
-                setCameraId(e.target.value)
-              }
-              placeholder="CAM_001"
-              disabled={isRunning}
+              onChange={(e) => setCameraId(e.target.value)}
+              disabled={isRunning || cameras.length === 0}
               required
-            />
+            >
+              {cameras.map((camera) => (
+                <option key={camera.camera_id} value={camera.camera_id}>
+                  {camera.camera_id} — {camera.name || camera.location_name}
+                </option>
+              ))}
+            </select>
           </label>
 
           <label>
