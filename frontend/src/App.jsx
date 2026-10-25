@@ -7,6 +7,11 @@ import HospitalResources from "./pages/HospitalResources";
 import HospitalHistory from "./pages/HospitalHistory";
 import HospitalIncidentDetails from "./pages/HospitalIncidentDetails";
 import LiveDashboard from "./pages/LiveDashboard";
+import DispatchPlanner from "./pages/DispatchPlanner";
+import Ambulances from "./pages/Ambulances";
+import Hospitals from "./pages/Hospitals";
+import CommandCentre from "./pages/CommandCentre";
+import AmbulanceSimulation from "./pages/AmbulanceSimulation";
 
 function Guard({ role, children }) {
   const auth = JSON.parse(localStorage.getItem("auth") || "null");
@@ -18,8 +23,13 @@ function Guard({ role, children }) {
 export default function App() {
   return <Routes>
     <Route path="/login" element={<Login />} />
+    <Route path="/ambulance" element={<AmbulanceSimulation />} />
     <Route element={<Layout />}>
       <Route path="/admin" element={<Guard role="admin"><AdminDashboard /></Guard>} />
+      <Route path="/admin/command-centre" element={<Guard role="admin"><CommandCentre /></Guard>} />
+      <Route path="/admin/dispatch" element={<Guard role="admin"><DispatchPlanner /></Guard>} />
+      <Route path="/admin/facilities" element={<Guard role="admin"><Hospitals /></Guard>} />
+      <Route path="/ambulances" element={<Guard><Ambulances /></Guard>} />
       <Route path="/hospital-dashboard" element={<Guard role="hospital"><HospitalDashboard /></Guard>} />
       <Route path="/live" element={<Guard role="live"><LiveDashboard /></Guard>} />
       <Route path="/hospital/resources" element={<Guard role="hospital"><HospitalResources /></Guard>} />

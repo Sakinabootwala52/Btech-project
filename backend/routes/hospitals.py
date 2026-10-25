@@ -44,10 +44,19 @@ def create_hospital():
         return jsonify({"error": "MISSING_FIELDS", "fields": missing}), 400
     if not validate_coordinates(data["latitude"], data["longitude"]):
         return jsonify({"error": "INVALID_COORDINATES"}), 400
+    facility_type = str(data.get("facility_type", "HOSPITAL")).upper()
+    if facility_type not in {"HOSPITAL", "CLINIC"}:
+        return jsonify({"error": "INVALID_FACILITY_TYPE", "allowed": ["HOSPITAL", "CLINIC"]}), 400
+    capabilities = data.get("capabilities", ["FIRST_AID"] if facility_type == "CLINIC" else ["FIRST_AID", "EMERGENCY", "TRAUMA"])
+    if not isinstance(capabilities, list) or any(str(x).upper() not in {"FIRST_AID", "EMERGENCY", "TRAUMA", "PEDIATRIC", "BURN"} for x in capabilities):
+        return jsonify({"error": "INVALID_CAPABILITIES"}), 400
     hospital = {
         "hospital_id": data["hospital_id"], "name": data["name"],
+        "address": str(data.get("address", "")).strip(),
         "latitude": data["latitude"], "longitude": data["longitude"],
-        "contact": data["contact"], "emergency_available": data.get("emergency_available", True),
+        "contact": data["contact"], "facility_type": str(data.get("facility_type", "HOSPITAL")).upper(),
+        "capabilities": [str(x).upper() for x in capabilities],
+        "emergency_available": data.get("emergency_available", True),
         "staff_available": data.get("staff_available", True), "status": data.get("status", "AVAILABLE"),
         "resources": data.get("resources", {
             "small_ambulances": 1, "large_ambulances": 1, "emergency_staff": 5, "beds_available": 5

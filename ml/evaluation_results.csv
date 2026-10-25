@@ -1,0 +1,12 @@
+video,conditions,actual,predicted,confidence,processing_seconds,events
+clip_01.mp4,Day; Fail braking; Accident,1,0,0.0,9.34,0
+clip_02.mp4,Night; Fail braking; Accident,1,1,0.75,11.375,1
+clip_03.mp4,Day; Accident,1,1,1.0,9.367,1
+clip_04.mp4,Day; Accident,1,1,0.8218,11.882,1
+clip_05.mp4,Day; Fail braking; Accident,1,1,0.85,10.254,1
+clip_06.mp4,Night; Near accident; Accident,1,1,0.75,11.386,1
+clip_07.mp4,Night; Near accident; Accident; Normal turning,1,0,0.0,9.844,0
+clip_08.mp4,Day; Normal braking; Near accident; Accident; Normal turning,1,0,0.0,13.041,0
+clip_09.mp4,Night; Normal braking; Near accident; Accident; Normal turning,1,1,0.75,9.903,1
+clip_10.mp4,Night; Normal braking; Near accident; Accident; Normal turning,1,1,0.7764,13.916,1
+clip_11.mp4,Day; No accident; Heavy traffic,0,0,0.0,19.385,0

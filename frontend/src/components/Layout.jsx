@@ -8,12 +8,17 @@ export default function Layout() {
   const isLive = auth?.role === "live";
   const links = isAdmin ? [
     ["/admin", "Dashboard", "⌂"],
+    ["/admin/command-centre", "Command Centre", "◉"],
+    ["/admin/dispatch", "Dispatch Planner", "↗"],
+    ["/admin/facilities", "Facilities", "✚"],
+    ["/ambulances", "Ambulances", "🚑"],
   ] : isLive ? [
     ["/live", "Video Feed", "▶"],
   ] : [
     ["/hospital-dashboard", "Live Alerts", "!"],
     ["/hospital/resources", "Resources", "+"],
     ["/hospital/history", "Accident History", "↺"],
+    ["/ambulances", "Ambulances", "🚑"],
   ];
 
   async function logout() {

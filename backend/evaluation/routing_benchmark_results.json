@@ -1,0 +1,142 @@
+{
+  "graph_label": "SYNTHETIC_DEMO_GRAPH_NOT_REAL_ROADS",
+  "node_count": 16,
+  "edge_count": 30,
+  "case_count": 4,
+  "all_optimal_costs_match": true,
+  "averages": {
+    "dijkstra_execution_ms": 0.0116,
+    "astar_execution_ms": 0.0169,
+    "dijkstra_nodes_expanded": 10.25,
+    "astar_nodes_expanded": 6.5,
+    "astar_nodes_expanded_reduction_pct": 36.07
+  },
+  "cases": [
+    {
+      "start": "N00",
+      "goal": "N33",
+      "dijkstra": {
+        "path": [
+          "N00",
+          "N11",
+          "N22",
+          "N33"
+        ],
+        "travel_time_min": 5.1,
+        "nodes_expanded": 10,
+        "execution_ms": 0.02,
+        "reachable": true,
+        "heuristic_used": false
+      },
+      "astar": {
+        "path": [
+          "N00",
+          "N11",
+          "N22",
+          "N33"
+        ],
+        "travel_time_min": 5.1,
+        "nodes_expanded": 6,
+        "execution_ms": 0.0177,
+        "reachable": true,
+        "heuristic_used": true
+      },
+      "optimal_cost_matches": true,
+      "nodes_expanded_reduction_pct": 40.0
+    },
+    {
+      "start": "N00",
+      "goal": "N20",
+      "dijkstra": {
+        "path": [
+          "N00",
+          "N10",
+          "N20"
+        ],
+        "travel_time_min": 3.9,
+        "nodes_expanded": 7,
+        "execution_ms": 0.0067,
+        "reachable": true,
+        "heuristic_used": false
+      },
+      "astar": {
+        "path": [
+          "N00",
+          "N10",
+          "N20"
+        ],
+        "travel_time_min": 3.9,
+        "nodes_expanded": 5,
+        "execution_ms": 0.0111,
+        "reachable": true,
+        "heuristic_used": true
+      },
+      "optimal_cost_matches": true,
+      "nodes_expanded_reduction_pct": 28.57
+    },
+    {
+      "start": "N01",
+      "goal": "N32",
+      "dijkstra": {
+        "path": [
+          "N01",
+          "N11",
+          "N22",
+          "N32"
+        ],
+        "travel_time_min": 5.95,
+        "nodes_expanded": 14,
+        "execution_ms": 0.0105,
+        "reachable": true,
+        "heuristic_used": false
+      },
+      "astar": {
+        "path": [
+          "N01",
+          "N11",
+          "N22",
+          "N32"
+        ],
+        "travel_time_min": 5.95,
+        "nodes_expanded": 9,
+        "execution_ms": 0.021,
+        "reachable": true,
+        "heuristic_used": true
+      },
+      "optimal_cost_matches": true,
+      "nodes_expanded_reduction_pct": 35.71
+    },
+    {
+      "start": "N33",
+      "goal": "N00",
+      "dijkstra": {
+        "path": [
+          "N33",
+          "N22",
+          "N11",
+          "N00"
+        ],
+        "travel_time_min": 5.1,
+        "nodes_expanded": 10,
+        "execution_ms": 0.0092,
+        "reachable": true,
+        "heuristic_used": false
+      },
+      "astar": {
+        "path": [
+          "N33",
+          "N22",
+          "N11",
+          "N00"
+        ],
+        "travel_time_min": 5.1,
+        "nodes_expanded": 6,
+        "execution_ms": 0.018,
+        "reachable": true,
+        "heuristic_used": true
+      },
+      "optimal_cost_matches": true,
+      "nodes_expanded_reduction_pct": 40.0
+    }
+  ]
+}

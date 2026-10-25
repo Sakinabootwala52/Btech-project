@@ -17,6 +17,9 @@ def init_db(uri: str, db_name: str):
     _db.incidents.create_index([("hospital_id", ASCENDING), ("timestamp", DESCENDING)])
     _db.attendance.create_index([("hospital_id", ASCENDING), ("accepted_at", DESCENDING)])
     _db.attendance.create_index([("incident_id", ASCENDING)], unique=True)
+    _db.ambulances.create_index([("ambulance_id", ASCENDING)], unique=True)
+    _db.ambulances.create_index([("hospital_id", ASCENDING), ("status", ASCENDING)])
+    # MongoDB automatically creates the unique _id index; do not recreate it.
     return _db
 
 def get_db():
@@ -28,3 +31,7 @@ def cameras_collection(): return get_db()["cameras"]
 def hospitals_collection(): return get_db()["hospitals"]
 def incidents_collection(): return get_db()["incidents"]
 def attendance_collection(): return get_db()["attendance"]
+
+
+def ambulances_collection(): return get_db()["ambulances"]
+def road_network_collection(): return get_db()["road_network"]

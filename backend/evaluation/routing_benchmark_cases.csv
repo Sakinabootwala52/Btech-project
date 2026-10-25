@@ -1,0 +1,5 @@
+start,goal,dijkstra_cost_min,astar_cost_min,dijkstra_nodes,astar_nodes,dijkstra_ms,astar_ms,optimal_cost_matches
+N00,N33,5.1,5.1,10,6,0.02,0.0177,True
+N00,N20,3.9,3.9,7,5,0.0067,0.0111,True
+N01,N32,5.95,5.95,14,9,0.0105,0.021,True
+N33,N00,5.1,5.1,10,6,0.0092,0.018,True

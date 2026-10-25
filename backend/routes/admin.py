@@ -88,3 +88,48 @@ def summary():
         "resource_snapshot": resource_rows,
         "hotspots": hotspots
     }), 200
+
+
+@admin_bp.get("/engineering-metrics")
+@require_login("admin")
+def engineering_metrics():
+    """Operational timing metrics; classifier precision/recall belongs to labelled ML evaluation."""
+    incidents = list(incidents_collection().find({}, {
+        "status": 1, "created_at": 1, "hospital_claimed_at": 1,
+        "accepted_status_at": 1, "processing_seconds": 1, "dispatched_at": 1,
+        "arrived_at": 1, "resolved_at": 1, "severity": 1,
+    }))
+    def parse_time(value):
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    pipeline = [float(row["processing_seconds"]) for row in incidents if isinstance(row.get("processing_seconds"), (int, float)) and row["processing_seconds"] >= 0]
+    response_seconds = []
+    dispatch_seconds = []
+    arrival_seconds = []
+    for row in incidents:
+        created = parse_time(row.get("created_at"))
+        accepted = parse_time(row.get("hospital_claimed_at") or row.get("accepted_status_at"))
+        dispatched = parse_time(row.get("dispatched_at"))
+        arrived = parse_time(row.get("arrived_at"))
+        if created and accepted and accepted >= created:
+            response_seconds.append((accepted - created).total_seconds())
+        if accepted and dispatched and dispatched >= accepted:
+            dispatch_seconds.append((dispatched - accepted).total_seconds())
+        if dispatched and arrived and arrived >= dispatched:
+            arrival_seconds.append((arrived - dispatched).total_seconds())
+    def avg(values):
+        return round(sum(values) / len(values), 2) if values else None
+    return jsonify({
+        "incident_count": len(incidents),
+        "pipeline_processing_seconds": {"sample_count": len(pipeline), "average": avg(pipeline), "max": round(max(pipeline), 2) if pipeline else None},
+        "detection_to_accept_seconds": {"sample_count": len(response_seconds), "average": avg(response_seconds)},
+        "accept_to_dispatch_seconds": {"sample_count": len(dispatch_seconds), "average": avg(dispatch_seconds)},
+        "dispatch_to_arrival_seconds": {"sample_count": len(arrival_seconds), "average": avg(arrival_seconds)},
+        "status_counts": {status: sum(1 for row in incidents if row.get("status") == status) for status in ["PENDING", "RESPONSE_ACCEPTED", "DISPATCHED", "EN_ROUTE", "ARRIVED", "RESOLVED"]},
+        "important_note": "These are operational timing metrics. Precision, recall, F1 and false-positive rate must be calculated from labelled test clips using ml/evaluate_all.py.",
+    }), 200
