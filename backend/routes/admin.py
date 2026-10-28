@@ -131,5 +131,4 @@ def engineering_metrics():
         "accept_to_dispatch_seconds": {"sample_count": len(dispatch_seconds), "average": avg(dispatch_seconds)},
         "dispatch_to_arrival_seconds": {"sample_count": len(arrival_seconds), "average": avg(arrival_seconds)},
         "status_counts": {status: sum(1 for row in incidents if row.get("status") == status) for status in ["PENDING", "RESPONSE_ACCEPTED", "DISPATCHED", "EN_ROUTE", "ARRIVED", "RESOLVED"]},
-        "important_note": "These are operational timing metrics. Precision, recall, F1 and false-positive rate must be calculated from labelled test clips using ml/evaluate_all.py.",
     }), 200

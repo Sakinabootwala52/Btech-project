@@ -37,7 +37,8 @@ export default function Ambulances() {
   }
   if (loading) return <Loading label="Loading ambulance registry..." />;
   return <section>
-    <div className="page-heading"><div><span className="eyebrow">FLEET MANAGEMENT</span><h2>Ambulance registry</h2><p>Track individually registered vehicles and prevent one vehicle being assigned to two incidents.</p></div><button className="button secondary" onClick={load}>Refresh</button></div>
+    <div className="page-heading"><div><span className="eyebrow">FLEET MANAGEMENT</span><h2>Ambulance registry</h2>
+    </div><button className="button secondary" onClick={load}>Refresh</button></div>
     <ErrorMessage message={error} />{notice && <p className="success-message">{notice}</p>}
     {isAdmin && <form className="panel" onSubmit={register} style={{ marginBottom: 20 }}>
       <h3>Register ambulance</h3><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>

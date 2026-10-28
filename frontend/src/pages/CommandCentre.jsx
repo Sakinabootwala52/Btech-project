@@ -12,6 +12,7 @@ import {
 import L from "leaflet";
 import { api } from "../api";
 import ErrorMessage from "../components/ErrorMessage";
+import AmbulanceSimulation from "./AmbulanceSimulation";
 
 const DEFAULT_CENTER = [18.5204, 73.8567];
 
@@ -40,19 +41,31 @@ function Metric({ label, value, detail }) {
   );
 }
 
+function isValidPoint(latitude, longitude) {
+  return (
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    latitude >= -90 &&
+    latitude <= 90 &&
+    longitude >= -180 &&
+    longitude <= 180 &&
+    !(latitude === 0 && longitude === 0)
+  );
+}
+
 /*
- * Normalize coordinate formats from the backend.
+ * Normalize coordinate formats returned by the backend.
  *
- * Supported:
- * { latitude: 18.52, longitude: 73.85 }
- * { lat: 18.52, lng: 73.85 }
- * { location: { latitude: 18.52, longitude: 73.85 } }
- * { position: { lat: 18.52, lng: 73.85 } }
+ * Supports:
+ * { latitude, longitude }
+ * { lat, lng }
+ * { location: { latitude, longitude } }
+ * { position: { lat, lng } }
  * GeoJSON Point: { type: "Point", coordinates: [lng, lat] }
- * Array: [lat, lng]
+ * Plain array: [lat, lng]
  */
 function getPoint(item) {
-  if (!item) return null;
+  if (!item || typeof item !== "object") return null;
 
   const candidates = [
     item,
@@ -69,7 +82,6 @@ function getPoint(item) {
   for (const candidate of candidates) {
     if (!candidate) continue;
 
-    // GeoJSON uses [longitude, latitude], unlike Leaflet.
     if (
       candidate.type === "Point" &&
       Array.isArray(candidate.coordinates) &&
@@ -81,9 +93,10 @@ function getPoint(item) {
       if (isValidPoint(latitude, longitude)) {
         return [latitude, longitude];
       }
+
+      continue;
     }
 
-    // Plain coordinate array is treated as [latitude, longitude].
     if (Array.isArray(candidate) && candidate.length >= 2) {
       const latitude = Number(candidate[0]);
       const longitude = Number(candidate[1]);
@@ -91,12 +104,13 @@ function getPoint(item) {
       if (isValidPoint(latitude, longitude)) {
         return [latitude, longitude];
       }
+
+      continue;
     }
 
-    const lat =
-      candidate.latitude ??
-      candidate.lat;
+    if (typeof candidate !== "object") continue;
 
+    const lat = candidate.latitude ?? candidate.lat;
     const lng =
       candidate.longitude ??
       candidate.lng ??
@@ -117,18 +131,6 @@ function getPoint(item) {
   }
 
   return null;
-}
-
-function isValidPoint(latitude, longitude) {
-  return (
-    Number.isFinite(latitude) &&
-    Number.isFinite(longitude) &&
-    latitude >= -90 &&
-    latitude <= 90 &&
-    longitude >= -180 &&
-    longitude <= 180 &&
-    !(latitude === 0 && longitude === 0)
-  );
 }
 
 function getSeverity(incident) {
@@ -157,13 +159,6 @@ function getHospitalName(hospital) {
   );
 }
 
-function formatCoordinate(value) {
-  if (value == null || value === "") return "N/A";
-
-  const number = Number(value);
-  return Number.isFinite(number) ? number.toFixed(5) : "N/A";
-}
-
 function FitBounds({ points }) {
   const map = useMap();
 
@@ -189,7 +184,6 @@ export default function CommandCentre() {
       id: 1,
       time: stamp(),
       title: "Command Centre opened",
-      detail: "Waiting for backend resource data.",
     },
   ]);
 
@@ -219,7 +213,7 @@ export default function CommandCentre() {
     speechEnabledRef.current = speechEnabled;
   }, [speechEnabled]);
 
-  const addEvent = useCallback((title, detail) => {
+  const addEvent = useCallback((title, detail = "") => {
     setEvents((previous) =>
       [
         {
@@ -246,8 +240,8 @@ export default function CommandCentre() {
   }, []);
 
   /*
-   * Load each backend resource once per refresh.
-   * Log the fresh response, not React state before it updates.
+   * Load incident, hospital, and ambulance records from the backend.
+   * The existing API integrations are preserved.
    */
   const loadResources = useCallback(async () => {
     try {
@@ -270,25 +264,21 @@ export default function CommandCentre() {
         ? ambulanceRows
         : [];
 
-      console.log(
-        "FULL MAP DATA:",
-        JSON.stringify(
-          {
-            incidents: nextIncidents,
-            hospitals: nextHospitals,
-            ambulances: nextAmbulances,
-          },
-          null,
-          2
-        )
-      );
+      console.log("FULL MAP DATA:", {
+        incidents: nextIncidents,
+        hospitals: nextHospitals,
+        ambulances: nextAmbulances,
+      });
 
       setIncidents(nextIncidents);
       setHospitals(nextHospitals);
       setAmbulances(nextAmbulances);
       setError("");
     } catch (e) {
-      console.error("Failed to load Command Centre resources:", e);
+      console.error(
+        "Failed to load Command Centre resources:",
+        e
+      );
 
       setError(
         `Could not load backend records: ${
@@ -346,9 +336,8 @@ export default function CommandCentre() {
     ) || null;
 
   /*
-   * This displays a route saved by the backend.
-   * It does not invent a route if route geometry is missing.
-   * The backend should store route_coordinates as [lat, lng] pairs.
+   * Use the route geometry saved on the selected incident.
+   * Backend arrays are expected to be [latitude, longitude].
    */
   const realRouteCoordinates = Array.isArray(
     selectedRealIncident?.route_coordinates
@@ -364,7 +353,6 @@ export default function CommandCentre() {
               : null;
           }
 
-          // Also accept objects containing lat/lng fields.
           return getPoint(point);
         })
         .filter(Boolean)
@@ -377,9 +365,6 @@ export default function CommandCentre() {
         String(selectedRealIncident?.recommended_hospital_id)
     ) || null;
 
-  /*
-   * Gather valid coordinates for all database markers.
-   */
   const incidentPoints = incidents
     .map(getPoint)
     .filter(Boolean);
@@ -416,9 +401,10 @@ export default function CommandCentre() {
         await api.engineering.routingBenchmark("sample");
 
       setBenchmark(result);
-
-      setNotice(
-        "Benchmark completed. This test uses a sample graph, not live traffic."
+      setNotice("Routing benchmark completed.");
+      addEvent(
+        "Routing benchmark completed",
+        `${result.case_count ?? 0} test cases evaluated.`
       );
     } catch (e) {
       setError(`Routing benchmark failed: ${e.message}`);
@@ -469,19 +455,11 @@ export default function CommandCentre() {
 
   return (
     <section className="command-centre">
+      {/* Page heading */}
       <div className="page-heading cc-heading">
         <div>
           <span className="eyebrow">EMERGENCY OPERATIONS</span>
           <h2>Accident Response Command Centre</h2>
-          <p>
-            Backend incidents, registered resources, hospital routing,
-            and dispatch analysis.
-          </p>
-        </div>
-
-        <div className="cc-mode-badge">
-          <span className="cc-live-dot" />
-          BACKEND DATA
         </div>
       </div>
 
@@ -489,37 +467,15 @@ export default function CommandCentre() {
 
       {notice && <p className="success-message">{notice}</p>}
 
-      <div className="cc-banner">
-        <strong>BACKEND DATA VIEW</strong>
-        <span>
-          Markers use coordinates returned by the backend. Ambulance
-          movement requires GPS updates or an active route simulation.
-        </span>
-      </div>
-
+      {/* Dashboard metrics */}
       <div className="cc-metrics-grid">
-        <Metric
-          label="Open incidents"
-          value={activeIncidents}
-          detail="Backend incident records"
-        />
-        <Metric
-          label="Registered facilities"
-          value={hospitals.length}
-          detail="Backend hospital records"
-        />
-        <Metric
-          label="Registered ambulances"
-          value={ambulances.length}
-          detail="Backend ambulance records"
-        />
-        <Metric
-          label="Available ambulances"
-          value={availableAmbulances}
-          detail="Backend availability status"
-        />
+        <Metric label="Open incidents" value={activeIncidents} />
+        <Metric label="Registered facilities" value={hospitals.length} />
+        <Metric label="Registered ambulances" value={ambulances.length} />
+        <Metric label="Available ambulances" value={availableAmbulances} />
       </div>
-
+{/* ========================================================================================== */}
+      {/* Main dashboard grid */}
       <div className="cc-main-grid">
         <div className="cc-map-panel">
           <div className="cc-panel-heading">
@@ -537,6 +493,7 @@ export default function CommandCentre() {
             </button>
           </div>
 
+          {/* Main incident map */}
           <div className="cc-map-wrap">
             <MapContainer
               center={mapCenter}
@@ -561,7 +518,7 @@ export default function CommandCentre() {
                   }}
                 >
                   <Popup>
-                    <strong>Saved backend road route</strong>
+                    <strong>Saved incident route</strong>
                     <br />
                     Incident: {getIncidentId(selectedRealIncident)}
                     <br />
@@ -572,6 +529,7 @@ export default function CommandCentre() {
                 </Polyline>
               )}
 
+              {/* Incident markers */}
               {incidents.map((incident, index) => {
                 const point = getPoint(incident);
                 if (!point) return null;
@@ -596,7 +554,9 @@ export default function CommandCentre() {
                     }}
                   >
                     <Popup>
-                      <strong>Incident: {incidentId || "Unknown"}</strong>
+                      <strong>
+                        Incident: {incidentId || "Unknown"}
+                      </strong>
                       <br />
                       Status: {incident.status || "Unknown"}
                       <br />
@@ -610,6 +570,7 @@ export default function CommandCentre() {
                 );
               })}
 
+              {/* Hospital markers */}
               {hospitals.map((hospital, index) => {
                 const point = getPoint(hospital);
                 if (!point) return null;
@@ -650,6 +611,7 @@ export default function CommandCentre() {
                 );
               })}
 
+              {/* Ambulance markers from backend records */}
               {ambulances.map((ambulance, index) => {
                 const point = getPoint(ambulance);
                 if (!point) return null;
@@ -683,20 +645,18 @@ export default function CommandCentre() {
             </MapContainer>
           </div>
 
+          {/* Hospital table */}
           <div className="cc-panel" style={{ marginTop: 16 }}>
             <div className="cc-panel-heading">
               <div>
-                <span className="eyebrow">BACKEND RECORDS</span>
-                <h3>Registered Hospitals & Clinics</h3>
+                <h3>Registered Hospitals &amp; Clinics</h3>
               </div>
               <span className="cc-count">{hospitals.length}</span>
             </div>
 
             {hospitals.length === 0 ? (
               <p className="cc-footnote">
-                {loading
-                  ? "Loading hospital records..."
-                  : "No hospital records returned by the backend."}
+                {loading ? "Loading hospital records..." : "No hospital records found."}
               </p>
             ) : (
               <div className="table-scroll">
@@ -715,11 +675,7 @@ export default function CommandCentre() {
                       const point = getPoint(hospital);
 
                       return (
-                        <tr
-                          key={
-                            getHospitalId(hospital) || index
-                          }
-                        >
+                        <tr key={getHospitalId(hospital) || index}>
                           <td>{getHospitalName(hospital)}</td>
                           <td>{hospital.facility_type || "N/A"}</td>
                           <td>{hospital.status || "Unknown"}</td>
@@ -743,11 +699,12 @@ export default function CommandCentre() {
           {mapPoints.length === 0 && (
             <p className="cc-footnote">
               No valid coordinates were found in the loaded records.
-              Check the FULL MAP DATA console output. No markers or routes
-              are fabricated by this component.
+              Check the FULL MAP DATA console output. This component
+              does not fabricate markers or routes.
             </p>
           )}
 
+          {/* Selected incident routing details */}
           <div className="cc-panel" style={{ marginTop: 16 }}>
             <div className="cc-panel-heading">
               <div>
@@ -755,8 +712,7 @@ export default function CommandCentre() {
                 <h3>Hospital routing result</h3>
               </div>
               <span className="cc-sim-chip">
-                {selectedRealIncident?.routing_method ||
-                  "No routing result"}
+                {selectedRealIncident?.routing_method || "No routing result"}
               </span>
             </div>
 
@@ -768,9 +724,7 @@ export default function CommandCentre() {
               id="cc-incident-select"
               className="month-input cc-select"
               value={selectedIncident}
-              onChange={(event) =>
-                setSelectedIncident(event.target.value)
-              }
+              onChange={(event) => setSelectedIncident(event.target.value)}
             >
               <option value="">Select an incident</option>
               {incidents.map((incident, index) => {
@@ -793,7 +747,7 @@ export default function CommandCentre() {
                 {loading
                   ? "Loading incident records..."
                   : incidents.length === 0
-                    ? "No incidents were returned by the backend."
+                    ? "No incident records found."
                     : "Select an incident to view its routing details."}
               </p>
             ) : (
@@ -824,7 +778,6 @@ export default function CommandCentre() {
                         ? `${selectedRealIncident.hospital_distance_km} km`
                         : "N/A"
                     }
-                    detail="Saved routing result"
                   />
                   <Metric
                     label="Estimated travel time"
@@ -833,7 +786,6 @@ export default function CommandCentre() {
                         ? `${selectedRealIncident.estimated_travel_time_min} min`
                         : "N/A"
                     }
-                    detail="Saved routing estimate"
                   />
                   <Metric
                     label="Route geometry"
@@ -842,7 +794,6 @@ export default function CommandCentre() {
                         ? "Available"
                         : "Unavailable"
                     }
-                    detail={`${realRouteCoordinates.length} route points`}
                   />
                 </div>
 
@@ -851,19 +802,12 @@ export default function CommandCentre() {
                     Routing message: {selectedRealIncident.routing_error}
                   </p>
                 )}
-
-                {realRouteCoordinates.length < 2 && (
-                  <p className="cc-footnote">
-                    This incident has no valid saved route geometry.
-                    The backend must calculate and save a road route for
-                    its actual incident and recommended hospital.
-                  </p>
-                )}
               </>
             )}
           </div>
         </div>
 
+        {/* Right sidebar */}
         <aside className="cc-side-column">
           <div className="cc-panel">
             <div className="cc-panel-heading">
@@ -901,6 +845,7 @@ export default function CommandCentre() {
             </label>
           </div>
 
+          {/* Backend resource health */}
           <div className="cc-panel">
             <div className="cc-panel-heading">
               <div>
@@ -917,7 +862,6 @@ export default function CommandCentre() {
             </div>
 
             <div className="cc-resource-row">
-              <span>Backend resource query</span>
               <b>
                 {loading
                   ? "Loading"
@@ -972,16 +916,30 @@ export default function CommandCentre() {
                 }
               </b>
             </div>
-
-            <p className="cc-footnote">
-              These counts come from API responses. They do not prove
-              that a physical GPS device is connected.
-            </p>
           </div>
         </aside>
       </div>
+{/* ============================================================================================ */}
+      {/* Ambulance simulation - separate full-width section */}
+      <section
+        className="cc-panel cc-ambulance-simulation-panel"
+        aria-label="Ambulance tracking and simulation"
+        style={{ marginTop: 20, minWidth: 0 }}
+      >
+        <div className="cc-panel-heading">
+          <div>
+            <span className="eyebrow">LIVE AMBULANCE OPERATIONS</span>
+            <h3>Ambulance Tracking &amp; Simulation</h3>
+            
+          </div>
+        </div>
 
+        <AmbulanceSimulation />
+      </section>
+
+      {/* Bottom panels: benchmark and Copilot */}
       <div className="cc-bottom-grid">
+        {/* A* vs Dijkstra benchmark */}
         <div className="cc-panel">
           <div className="cc-panel-heading">
             <div>
@@ -1017,9 +975,10 @@ export default function CommandCentre() {
                     ? "✓ Optimal costs match"
                     : "! Cost mismatch"}
                 </span>
+
                 <span>
-                  {benchmark.case_count} cases · {benchmark.node_count}{" "}
-                  nodes · {benchmark.edge_count} edges
+                  {benchmark.case_count} cases · {benchmark.node_count} nodes ·{" "}
+                  {benchmark.edge_count} edges
                 </span>
               </div>
 
@@ -1028,26 +987,22 @@ export default function CommandCentre() {
                   {[
                     {
                       label: "Dijkstra time",
-                      value:
-                        benchmark.averages.dijkstra_execution_ms,
+                      value: benchmark.averages.dijkstra_execution_ms,
                       unit: "ms",
                     },
                     {
                       label: "A* time",
-                      value:
-                        benchmark.averages.astar_execution_ms,
+                      value: benchmark.averages.astar_execution_ms,
                       unit: "ms",
                     },
                     {
                       label: "Dijkstra nodes",
-                      value:
-                        benchmark.averages.dijkstra_nodes_expanded,
+                      value: benchmark.averages.dijkstra_nodes_expanded,
                       unit: "",
                     },
                     {
                       label: "A* nodes",
-                      value:
-                        benchmark.averages.astar_nodes_expanded,
+                      value: benchmark.averages.astar_nodes_expanded,
                       unit: "",
                     },
                   ].map((item) => (
@@ -1078,6 +1033,7 @@ export default function CommandCentre() {
               {Array.isArray(benchmark.cases) && (
                 <details className="cc-details">
                   <summary>View per-case results</summary>
+
                   <div className="table-scroll">
                     <table className="data-table">
                       <thead>
@@ -1090,6 +1046,7 @@ export default function CommandCentre() {
                           <th>Match</th>
                         </tr>
                       </thead>
+
                       <tbody>
                         {benchmark.cases.map((item, index) => (
                           <tr
@@ -1124,10 +1081,13 @@ export default function CommandCentre() {
           )}
         </div>
 
+        {/* AI Dispatch Copilot */}
         <div className="cc-panel">
           <div className="cc-panel-heading">
             <div>
-              <span className="eyebrow">RETRIEVAL-AUGMENTED ASSISTANT</span>
+              <span className="eyebrow">
+                RETRIEVAL-AUGMENTED ASSISTANT
+              </span>
               <h3>AI Dispatch Copilot</h3>
             </div>
             <span className="cc-ai-chip">AI + SOURCES</span>
@@ -1179,6 +1139,7 @@ export default function CommandCentre() {
               {copilot.citations?.length > 0 && (
                 <div className="cc-citations">
                   <strong>Retrieved sources</strong>
+
                   {copilot.citations.map((source) => (
                     <a
                       key={source.id}
@@ -1198,6 +1159,7 @@ export default function CommandCentre() {
                         [{source.id}] {source.title}
                       </b>
                       <span>{source.organization}</span>
+
                       {source.url?.startsWith("http") && (
                         <small>{source.url}</small>
                       )}
@@ -1207,11 +1169,6 @@ export default function CommandCentre() {
               )}
             </div>
           )}
-
-          <p className="cc-footnote">
-            Copilot uses the selected backend incident and dispatch
-            recommendations. It does not dispatch an ambulance automatically.
-          </p>
         </div>
       </div>
     </section>

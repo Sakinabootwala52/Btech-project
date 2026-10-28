@@ -218,10 +218,7 @@ const hotspotIncidents = incidents
 
           <h2>Overall accident response summary</h2>
 
-          <p>
-            Review incidents, hospital performance, resources
-            and accident hotspots.
-          </p>
+          
         </div>
 
         <input
@@ -244,26 +241,22 @@ const hotspotIncidents = incidents
             <StatCard
               label="All-time accidents"
               value={data.totals?.all_time ?? 0}
-              detail="All recorded incidents"
             />
 
             <StatCard
               label="Accidents this month"
               value={data.totals?.this_month ?? 0}
-              detail={data.month}
             />
 
             <StatCard
               label="Pending"
               value={data.totals?.pending ?? 0}
-              detail="Awaiting hospital acceptance"
               tone="danger"
             />
 
             <StatCard
               label="Resolved"
               value={data.totals?.resolved ?? 0}
-              detail="Completed cases"
             />
           </div>
 
@@ -277,9 +270,7 @@ const hotspotIncidents = incidents
               <div className="panel-header">
                 <div>
                   <h3>Hospital performance</h3>
-                  <span>
-                    Cases each hospital has attended
-                  </span>
+                  
                 </div>
               </div>
 
@@ -322,7 +313,6 @@ const hotspotIncidents = incidents
               <div className="panel-header">
                 <div>
                   <h3>Current resources</h3>
-                  <span>Latest reported capacity</span>
                 </div>
               </div>
 
@@ -373,10 +363,6 @@ const hotspotIncidents = incidents
               <div>
                 <h3>Accident hotspots &amp; hospital network</h3>
 
-                <span>
-                  Recorded accident locations, hospitals and
-                  the selected incident's route
-                </span>
               </div>
             </div>
 
@@ -440,9 +426,7 @@ const hotspotIncidents = incidents
               <div className="panel-header">
                 <div>
                   <h3>Hospital route comparison</h3>
-                  <span>
-                    Hospitals compared for the selected incident
-                  </span>
+                  
                 </div>
               </div>
 
@@ -619,9 +603,6 @@ const hotspotIncidents = incidents
               <div>
                 <h3>Recent hospital attendances</h3>
 
-                <span>
-                  Resources captured when each case was accepted
-                </span>
               </div>
             </div>
 

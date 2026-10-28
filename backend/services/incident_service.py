@@ -18,28 +18,40 @@ def generate_incident_id():
     return f"INC_{uuid4().hex[:8].upper()}"
 
 
-def find_duplicate(camera_id, timestamp):
-    return incidents_collection().find_one({
+def find_duplicate(camera_id, timestamp, event_id=None):
+    """Find an incident created by the same camera event."""
+    collection = incidents_collection()
+
+    if event_id:
+        existing = collection.find_one({
+            "camera_id": camera_id,
+            "event_id": event_id,
+        })
+        if existing:
+            return existing
+
+    return collection.find_one({
         "camera_id": camera_id,
         "timestamp": timestamp,
     })
 
 
 def create_incident_from_detection(payload):
-    """Create an incident and save a comparison of nearby hospitals."""
+    """Create one incident and recommend nearby eligible hospitals."""
 
     if not isinstance(payload, dict):
         raise ValueError("Detection payload must be a dictionary.")
 
     camera_id = payload.get("camera_id")
     timestamp = payload.get("timestamp")
+    event_id = payload.get("event_id")
 
     if not camera_id or timestamp is None:
         raise ValueError(
             "Detection payload must contain camera_id and timestamp."
         )
 
-    # 1. Find the camera that detected the accident.
+    # Validate that the detecting camera exists.
     camera = cameras_collection().find_one({
         "camera_id": camera_id,
     })
@@ -47,13 +59,13 @@ def create_incident_from_detection(payload):
     if camera is None:
         raise ValueError(f"Camera '{camera_id}' not found.")
 
-    # 2. Avoid creating duplicate incidents.
-    duplicate = find_duplicate(camera_id, timestamp)
+    # Avoid duplicate incident creation.
+    duplicate = find_duplicate(camera_id, timestamp, event_id)
 
     if duplicate:
         return serialize_document(duplicate), False
 
-    # 3. Get currently eligible hospitals.
+    # Find hospitals that are currently eligible.
     available = list(
         hospitals_collection().find({
             "emergency_available": True,
@@ -66,11 +78,9 @@ def create_incident_from_detection(payload):
     recommended = None
     eligible = available
     hospital_comparison = []
-
     routing_method = "UNAVAILABLE"
     routing_error = None
 
-    # 4. Shortlist up to three nearby hospitals and compare their routes.
     if available:
         try:
             selection = select_nearest_hospital_by_road_time(
@@ -82,25 +92,25 @@ def create_incident_from_detection(payload):
             )
 
             recommended = selection["hospital"]
-
-            # Keep all successfully compared hospitals eligible to respond.
             eligible = selection["candidate_hospitals"]
             hospital_comparison = selection["comparisons"]
-
             routing_method = "OSRM_ROAD_TIME"
 
         except HospitalRoutingError as exc:
             routing_method = "OSRM_UNAVAILABLE"
             routing_error = str(exc)
 
-        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            OverflowError,
+        ) as exc:
             routing_method = "INVALID_ROUTING_DATA"
             routing_error = str(exc)
-
     else:
         routing_method = "NO_AVAILABLE_HOSPITALS"
 
-    # 5. Store the hospitals that may respond to this incident.
     eligible_ids = [
         hospital["hospital_id"]
         for hospital in eligible
@@ -113,7 +123,6 @@ def create_incident_from_detection(payload):
         if hospital.get("hospital_id") and hospital.get("name")
     ]
 
-    # 6. Store route details for the recommended hospital.
     road_distance_km = (
         selection.get("road_distance_km") if selection else None
     )
@@ -131,9 +140,9 @@ def create_incident_from_detection(payload):
         selection.get("route") if selection else None
     )
 
-    # 7. Create the incident with the full hospital comparison.
     incident = {
         "incident_id": generate_incident_id(),
+        "event_id": event_id,
         "camera_id": camera_id,
         "timestamp": timestamp,
 
@@ -145,8 +154,8 @@ def create_incident_from_detection(payload):
         "speed_after": payload.get("speed_after"),
         "speed_unit": payload.get("speed_unit"),
         "severity": payload.get("severity"),
-        "video_clip": payload.get("video_clip"),
         "severity_score": payload.get("severity_score"),
+        "video_clip": payload.get("video_clip"),
         "evidence": payload.get("evidence", {}),
         "processing_seconds": payload.get("processing_seconds"),
         "detector_version": payload.get(
@@ -154,15 +163,11 @@ def create_incident_from_detection(payload):
             "weighted-evidence-v1",
         ),
 
-        # Multiple shortlisted hospitals can respond.
         "eligible_hospitals": eligible_ids,
         "eligible_hospital_names": eligible_names,
-
-        # Comparison data for displaying the alternatives in the UI.
         "hospital_comparison": hospital_comparison,
         "hospital_candidates_count": len(hospital_comparison),
 
-        # Recommendation is not the same as hospital acceptance.
         "hospital_id": None,
         "recommended_hospital_id": (
             recommended.get("hospital_id") if recommended else None
@@ -185,7 +190,6 @@ def create_incident_from_detection(payload):
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    # 8. Save the incident.
     incidents_collection().insert_one(incident)
 
     return serialize_document(incident), True

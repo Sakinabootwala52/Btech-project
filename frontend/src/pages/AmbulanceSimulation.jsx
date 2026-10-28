@@ -54,7 +54,6 @@ const toPoint = (value, depth = 0) => {
   }
 
   if (Array.isArray(value) && value.length >= 2) {
-    // Plain arrays in this application use [latitude, longitude].
     return toPoint(
       { latitude: value[0], longitude: value[1] },
       depth + 1
@@ -111,7 +110,6 @@ const toPoint = (value, depth = 0) => {
 };
 
 // Saved Leaflet route arrays use [latitude, longitude].
-// Object coordinates are also supported.
 const toRouteCoordinates = (value) => {
   if (!Array.isArray(value)) return [];
 
@@ -251,8 +249,6 @@ async function getRoadRoute(start, end) {
   }
 
   return {
-    // OSRM uses [longitude, latitude].
-    // Leaflet uses [latitude, longitude].
     coordinates: route.geometry.coordinates.map(
       ([longitude, latitude]) => [latitude, longitude]
     ),
@@ -275,7 +271,7 @@ function getHospitalPoint(row) {
 }
 
 function getSavedRoute(tracking) {
-  const phase = tracking?.phase;
+  const phase = String(tracking?.phase || "").toUpperCase();
 
   const savedRoute =
     phase === "TO_HOSPITAL" || phase === "COMPLETED"
@@ -410,12 +406,10 @@ export default function AmbulanceSimulation() {
     }
   }, []);
 
-  // Initial load.
   useEffect(() => {
     loadAssignments();
   }, [loadAssignments]);
 
-  // Refresh assignments every five seconds, but not during a trip.
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (busyRef.current || !mountedRef.current) return;
@@ -446,6 +440,15 @@ export default function AmbulanceSimulation() {
     ambulance?.tracking ||
     {};
 
+  // Normalize API values because records may contain lowercase status/phase.
+  const normalizedIncidentStatus = String(
+    incident?.status || ""
+  ).trim().toUpperCase();
+
+  const normalizedPhase = String(
+    tracking?.phase || "NOT STARTED"
+  ).trim().toUpperCase();
+
   const trackingPosition = toPoint(tracking?.position);
 
   const ambulanceStoredPosition =
@@ -453,7 +456,6 @@ export default function AmbulanceSimulation() {
     toPoint(ambulance?.current_position) ||
     toPoint(ambulance?.location);
 
-  // Do not invent an ambulance position.
   const currentPosition =
     vehiclePosition || trackingPosition || ambulanceStoredPosition;
 
@@ -474,7 +476,6 @@ export default function AmbulanceSimulation() {
     ]
   );
 
-  // Restore a saved route when the selected assignment changes.
   useEffect(() => {
     if (busy) return;
 
@@ -496,7 +497,7 @@ export default function AmbulanceSimulation() {
       );
 
       setHospitalReached(
-        tracking?.phase === "TO_HOSPITAL" &&
+        String(tracking?.phase || "").toUpperCase() === "TO_HOSPITAL" &&
           Number.isFinite(savedProgress) &&
           savedProgress >= 1
       );
@@ -579,8 +580,7 @@ export default function AmbulanceSimulation() {
         const index = indices[step];
         const [latitude, longitude] = coordinates[index];
 
-        const fraction =
-          index / Math.max(total - 1, 1);
+        const fraction = index / Math.max(total - 1, 1);
 
         setVehiclePosition({ latitude, longitude });
         setProgress(Math.round(fraction * 100));
@@ -596,8 +596,6 @@ export default function AmbulanceSimulation() {
           ? durationMinutes * 60 * (1 - fraction)
           : null;
 
-        // Keep the existing Flask position endpoint.
-        // If this request fails, stop and show the error.
         await api.ambulanceSim.position(ambulanceId, {
           latitude,
           longitude,
@@ -639,7 +637,7 @@ export default function AmbulanceSimulation() {
       return;
     }
 
-    if (!["DISPATCHED", "EN_ROUTE"].includes(incident?.status)) {
+    if (!["DISPATCHED", "EN_ROUTE"].includes(normalizedIncidentStatus)) {
       setError(
         `The trip to the accident cannot start from incident status ${
           incident?.status || "UNKNOWN"
@@ -649,8 +647,8 @@ export default function AmbulanceSimulation() {
     }
 
     if (
-      tracking?.phase === "TO_SCENE" ||
-      tracking?.phase === "TO_HOSPITAL"
+      normalizedPhase === "TO_SCENE" ||
+      normalizedPhase === "TO_HOSPITAL"
     ) {
       setError(
         "A trip is already in progress. Continue the existing trip instead of starting it again."
@@ -664,7 +662,6 @@ export default function AmbulanceSimulation() {
     setHospitalReached(false);
 
     try {
-      // Hospital -> accident scene.
       const route = await getRoadRoute(
         hospitalPoint,
         incidentPoint
@@ -708,6 +705,8 @@ export default function AmbulanceSimulation() {
           "Could not complete the trip to the accident."
       );
 
+      console.error("Start trip failed:", err);
+
       await refreshAfterAction().catch(() => {});
     } finally {
       setBusy(false);
@@ -728,8 +727,8 @@ export default function AmbulanceSimulation() {
     }
 
     if (
-      incident?.status !== "ARRIVED" ||
-      tracking?.phase === "COMPLETED"
+      normalizedIncidentStatus !== "ARRIVED" ||
+      normalizedPhase === "COMPLETED"
     ) {
       setError(
         "Transport can start after the ambulance reaches the accident scene."
@@ -737,7 +736,7 @@ export default function AmbulanceSimulation() {
       return;
     }
 
-    if (tracking?.phase === "TO_HOSPITAL") {
+    if (normalizedPhase === "TO_HOSPITAL") {
       setError("Hospital transport has already started.");
       return;
     }
@@ -748,7 +747,6 @@ export default function AmbulanceSimulation() {
     setHospitalReached(false);
 
     try {
-      // Accident scene -> assigned hospital.
       const route = await getRoadRoute(
         incidentPoint,
         hospitalPoint
@@ -797,6 +795,8 @@ export default function AmbulanceSimulation() {
         err?.message ||
           "Could not complete hospital transport."
       );
+
+      console.error("Hospital transport failed:", err);
 
       await refreshAfterAction().catch(() => {});
     } finally {
@@ -847,6 +847,8 @@ export default function AmbulanceSimulation() {
         err?.message ||
           "Could not complete the ambulance trip."
       );
+
+      console.error("Complete trip failed:", err);
     } finally {
       setBusy(false);
     }
@@ -859,22 +861,24 @@ export default function AmbulanceSimulation() {
   const phase = tracking?.phase || "NOT STARTED";
 
   const canStart =
-    !!ambulance?.ambulance_id &&
-    ["DISPATCHED", "EN_ROUTE"].includes(incident?.status) &&
-    !["TO_SCENE", "TO_HOSPITAL", "COMPLETED"].includes(phase);
+    Boolean(ambulance?.ambulance_id) &&
+    ["DISPATCHED", "EN_ROUTE"].includes(normalizedIncidentStatus) &&
+    !["TO_SCENE", "TO_HOSPITAL", "COMPLETED"].includes(
+      normalizedPhase
+    );
 
   const canTransport =
-    incident?.status === "ARRIVED" &&
-    phase !== "TO_HOSPITAL" &&
-    phase !== "COMPLETED";
+    normalizedIncidentStatus === "ARRIVED" &&
+    normalizedPhase !== "TO_HOSPITAL" &&
+    normalizedPhase !== "COMPLETED";
 
   const canComplete =
-    incident?.status === "ARRIVED" &&
-    phase === "TO_HOSPITAL" &&
+    normalizedIncidentStatus === "ARRIVED" &&
+    normalizedPhase === "TO_HOSPITAL" &&
     hospitalReached;
 
   const hasCoordinates =
-    !!incidentPoint && !!hospitalPoint;
+    Boolean(incidentPoint) && Boolean(hospitalPoint);
 
   const trackingPoint = toPoint(tracking?.position);
 
@@ -903,16 +907,12 @@ export default function AmbulanceSimulation() {
       <section className="ambulance-stats">
         <article className="ambulance-stat">
           <span>Ambulance ID</span>
-          <strong>
-            {ambulance?.ambulance_id || "—"}
-          </strong>
+          <strong>{ambulance?.ambulance_id || "—"}</strong>
         </article>
 
         <article className="ambulance-stat">
           <span>Incident ID</span>
-          <strong>
-            {incident?.incident_id || "No assignment"}
-          </strong>
+          <strong>{incident?.incident_id || "No assignment"}</strong>
         </article>
 
         <article className="ambulance-stat">
@@ -1068,19 +1068,15 @@ export default function AmbulanceSimulation() {
             </MapContainer>
           </div>
 
-          <div className="map-legend">
-            
-          </div>
+          <div className="map-legend" />
 
           {!incidentPoint &&
             !hospitalPoint &&
             !currentPosition && (
               <p className="empty-notifications">
-                
+                No location data is available yet.
               </p>
             )}
-
-          
         </section>
 
         <aside className="ambulance-sidebar">
@@ -1178,6 +1174,28 @@ export default function AmbulanceSimulation() {
                     ? "Processing trip…"
                     : "Start Trip to Accident"}
                 </button>
+
+                {!busy && !loading && !canStart && (
+                  <p className="empty-notifications" role="status">
+                    {!ambulance?.ambulance_id
+                      ? "No ambulance selected."
+                      : !incident
+                        ? "No incident is assigned to this ambulance."
+                        : !["DISPATCHED", "EN_ROUTE"].includes(
+                            normalizedIncidentStatus
+                          )
+                          ? `Incident status is ${incident?.status || "UNKNOWN"}. Dispatch the ambulance first.`
+                          : [
+                              "TO_SCENE",
+                              "TO_HOSPITAL",
+                              "COMPLETED",
+                            ].includes(normalizedPhase)
+                            ? `Trip cannot start during phase ${normalizedPhase}. Refresh the assignment or continue the current trip.`
+                            : !hasCoordinates
+                              ? "Valid incident and hospital coordinates are required."
+                              : "The trip is not ready to start. Check the assignment and operator permissions."}
+                  </p>
+                )}
 
                 <button
                   type="button"

@@ -12,7 +12,7 @@ import Ambulances from "./pages/Ambulances";
 import Hospitals from "./pages/Hospitals";
 import CommandCentre from "./pages/CommandCentre";
 import AmbulanceSimulation from "./pages/AmbulanceSimulation";
-// import AmbulanceSimulation from "./pages/AmbulanceLiveControl";
+
 
 import { homeFor } from "./utils";
 

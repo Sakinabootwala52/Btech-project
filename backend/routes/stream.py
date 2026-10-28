@@ -1,23 +1,26 @@
+
 import json
+import os
+import shutil
 import subprocess
+import threading
 import uuid
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
 
 from flask import Blueprint, jsonify, request, session
 from pymongo import ReturnDocument
 
 from config import Config
 from database.mongo import incidents_collection, cameras_collection
-from services.incident_service import (
-    create_incident_from_detection,
-)
+from services.incident_service import create_incident_from_detection
 from utils.serializers import serialize_document
 
 
 stream_bp = Blueprint("stream", __name__)
 
 STREAMS = {}
+STREAMS_LOCK = threading.RLock()
 
 DEFAULT_CALLBACK_URL = (
     "http://127.0.0.1:5000/api/live/stream/internal/event"
@@ -31,508 +34,122 @@ def require_live():
 def resolve_paths():
     backend_dir = Path(__file__).resolve().parents[1]
     project_root = backend_dir.parent
-
     ml_dir = project_root / "ml"
-    sample_video_dir = project_root / "sample_videos"
 
-    python_path = (
-       ml_dir
-       / ".venv"
-       / "Scripts"
-       / "python.exe"
+    configured_upload_dir = Path(Config.UPLOAD_DIR)
+    upload_dir = (
+        configured_upload_dir
+        if configured_upload_dir.is_absolute()
+        else backend_dir / configured_upload_dir
     )
-
-
-    worker_path = (
-        ml_dir
-        / "stream_worker.py"
-    )
-
-    configured_upload_dir = Path(
-        Config.UPLOAD_DIR
-    )
-
-    if configured_upload_dir.is_absolute():
-        upload_dir = configured_upload_dir
-    else:
-        upload_dir = (
-            backend_dir
-            / configured_upload_dir
-        )
 
     return {
         "backend_dir": backend_dir,
         "project_root": project_root,
         "ml_dir": ml_dir,
-        "sample_video_dir":
-            sample_video_dir,
-        "python_path":
-            python_path,
-        "worker_path":
-            worker_path,
-        "upload_dir":
-            upload_dir.resolve(),
+        "sample_video_dir": project_root / "sample_videos",
+        "python_path": ml_dir / ".venv" / "Scripts" / "python.exe",
+        "worker_path": ml_dir / "stream_worker.py",
+        "upload_dir": upload_dir.resolve(),
     }
 
 
-def write_status(
-    status_file,
-    data,
-):
-    status_file.parent.mkdir(
-        parents=True,
-        exist_ok=True,
+def write_status(status_file, data):
+    status_file = Path(status_file)
+    status_file.parent.mkdir(parents=True, exist_ok=True)
+
+    temp_file = status_file.with_name(
+        f"{status_file.stem}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     )
 
-    temp_file = status_file.with_suffix(
-        ".tmp"
-    )
+    try:
+        with temp_file.open("w", encoding="utf-8") as file:
+            json.dump(data, file, indent=2, default=str)
+            file.flush()
+            os.fsync(file.fileno())
 
-    temp_file.write_text(
-        json.dumps(
-            data,
-            indent=2,
-            default=str,
-        ),
-        encoding="utf-8",
-    )
-
-    temp_file.replace(
-        status_file
-    )
+        os.replace(str(temp_file), str(status_file))
+    finally:
+        try:
+            temp_file.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
-def copy_clip_to_public_uploads(
-    clip_value,
-):
+def copy_clip_to_public_uploads(clip_value):
     if not clip_value:
         return None
 
     paths = resolve_paths()
-
-    upload_dir = paths["upload_dir"]
     ml_dir = paths["ml_dir"]
+    upload_dir = paths["upload_dir"]
 
-    clip_source = Path(
-        str(clip_value)
-    )
+    clip_source = Path(str(clip_value))
 
     if not clip_source.is_absolute():
-        clip_source = (
-            ml_dir
-            / clip_source
-        ).resolve()
+        clip_source = (ml_dir / clip_source).resolve()
 
-    if not clip_source.exists():
+    if not clip_source.is_file():
         return None
 
-    upload_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    upload_dir.mkdir(parents=True, exist_ok=True)
 
-    public_name = (
-        f"{uuid.uuid4().hex[:10]}_"
-        f"{clip_source.name}"
-    )
-
-    public_path = (
-        upload_dir
-        / public_name
-    )
+    public_name = f"{uuid.uuid4().hex[:10]}_{clip_source.name}"
+    public_path = upload_dir / public_name
 
     try:
-        import shutil
-
-        shutil.copy2(
-            clip_source,
-            public_path,
-        )
-    except OSError:
+        shutil.copy2(clip_source, public_path)
+    except OSError as exc:
+        print(f"CLIP COPY ERROR: {exc}", flush=True)
         return None
 
-    return (
-        f"/uploads/{public_name}"
-    )
+    return f"/uploads/{public_name}"
 
 
-def build_payload(
-    stream,
-    event,
-):
+def build_payload(stream, event):
     payload = dict(event)
-
-    payload["camera_id"] = (
-        stream["camera_id"]
-    )
+    payload["camera_id"] = stream["camera_id"]
+    payload["event_id"] = event.get("event_id")
     payload["video_timestamp_seconds"] = event.get(
-    "timestamp_seconds"
+        "timestamp_seconds"
     )
+
+    # Keep the original video timestamp separate from the database
+    # creation timestamp.
     payload["timestamp"] = datetime.now(timezone.utc).isoformat()
 
     return payload
 
 
-# ============================================================
-# FALLBACK FINAL EVENT PUBLISHER
-# ============================================================
+def event_key_for(stream, event):
+    event_id = event.get("event_id")
 
-def publish_final_event(
-    stream,
-    event,
-):
-    payload = build_payload(
-        stream,
-        event,
-    )
+    if event_id:
+        return str(event_id)
 
-    public_clip = (
-        copy_clip_to_public_uploads(
-            event.get("video_clip")
-        )
-    )
-
-    if public_clip:
-        payload["video_clip"] = (
-            public_clip
-        )
-
-    event_key = (
+    return (
         f"{stream['camera_id']}:"
         f"{event.get('timestamp_seconds')}"
     )
 
-    try:
-        incident, created = (
-            create_incident_from_detection(
-                payload
-            )
-        )
 
-        incident_id = incident.get(
-            "incident_id"
-        )
-
-        if incident_id:
-            stream["incident_id"] = (
-                incident_id
-            )
-
-        stream.setdefault(
-            "published_events",
-            set(),
-        ).add(
-            event_key
-        )
-
-        # If incident was already created by the
-        # immediate callback, attach the final evidence.
-        if not created and incident_id:
-
-            update_fields = {}
-
-            for key in [
-                "confidence",
-                "speed_before",
-                "speed_after",
-                "speed_anomaly",
-                "trajectory_anomaly",
-                "collision_proximity",
-                "persistent_abnormal_motion",
-                "severity",
-            ]:
-                value = payload.get(
-                    key
-                )
-
-                if value is not None:
-                    update_fields[key] = (
-                        value
-                    )
-
-            if payload.get(
-                "video_clip"
-            ):
-                update_fields[
-                    "video_clip"
-                ] = payload[
-                    "video_clip"
-                ]
-
-            if update_fields:
-                updated = (
-                    incidents_collection()
-                    .find_one_and_update(
-                        {
-                            "incident_id":
-                                incident_id
-                        },
-                        {
-                            "$set":
-                                update_fields
-                        },
-                        return_document=
-                            ReturnDocument.AFTER,
-                    )
-                )
-
-                if updated:
-                    incident = (
-                        serialize_document(
-                            updated
-                        )
-                    )
-
-        return incident
-
-    except Exception as exc:
-        print(
-            "\n========== STREAM PUBLISH ERROR =========="
-        )
-        print(
-            f"Error: {exc}"
-        )
-        print(
-            "============================================\n"
-        )
-
-        return None
-
-
-def publish_stream_events(
-    stream,
-    status,
-):
-    """
-    Safety net.
-
-    Normally events are already sent directly from
-    stream_worker.py through the callback endpoint.
-    """
-
-    events = status.get(
-        "events",
-        [],
-    )
-
-    if not events:
+def remember_event_incident(stream, event_key, incident_id):
+    if not incident_id:
         return
 
-    published_events = stream.setdefault(
-        "published_events",
-        set(),
-    )
+    with STREAMS_LOCK:
+        stream.setdefault("incident_ids", {})[
+            str(event_key)
+        ] = incident_id
 
-    for event in events:
-
-        event_key = (
-            f"{stream['camera_id']}:"
-            f"{event.get('timestamp_seconds')}"
-        )
-
-        if event_key in published_events:
-            continue
-
-        publish_final_event(
-            stream,
-            event,
-        )
+        # Retain the most recently created incident for older dashboard code.
+        stream["incident_id"] = incident_id
 
 
-# ============================================================
-# IMMEDIATE ML CALLBACK
-# ============================================================
-
-@stream_bp.post(
-    "/internal/event"
-)
-def internal_stream_event():
-
-    data = request.get_json(
-        silent=True
-    ) or {}
-
-    stream_id = str(
-        data.get(
-            "stream_id",
-            "",
-        )
-    ).strip()
-
-    token = str(
-        data.get(
-            "token",
-            "",
-        )
-    ).strip()
-
-    event_type = str(
-        data.get(
-            "event_type",
-            "",
-        )
-    ).strip().lower()
-
-    event = data.get(
-        "event"
-    ) or {}
-
-    if not stream_id:
-        return jsonify({
-            "error":
-                "STREAM_ID_REQUIRED"
-        }), 400
-
-    stream = STREAMS.get(
-        stream_id
-    )
-
-    if stream is None:
-        return jsonify({
-            "error":
-                "STREAM_NOT_FOUND"
-        }), 404
-
-    if token != stream.get(
-        "callback_token"
-    ):
-        return jsonify({
-            "error":
-                "INVALID_CALLBACK_TOKEN"
-        }), 403
-
-    if event_type not in {
-        "detected",
-        "finalized",
-    }:
-        return jsonify({
-            "error":
-                "INVALID_EVENT_TYPE"
-        }), 400
-
-    # ========================================================
-    # IMMEDIATE DETECTION
-    # ========================================================
-
-    if event_type == "detected":
-
-        payload = build_payload(
-            stream,
-            event,
-        )
-
-        # No evidence clip yet.
-        # Hospital should NOT wait for it.
-        payload["video_clip"] = None
-
-        try:
-            incident, created = (
-                create_incident_from_detection(
-                    payload
-                )
-            )
-
-            incident_id = (
-                incident.get(
-                    "incident_id"
-                )
-            )
-
-            stream["incident_id"] = (
-                incident_id
-            )
-
-            print(
-                "\n"
-                "========== IMMEDIATE "
-                "INCIDENT CREATED =========="
-            )
-
-            print(
-                f"STREAM ID : {stream_id}"
-            )
-
-            print(
-                f"INCIDENT  : {incident_id}"
-            )
-
-            print(
-                f"CREATED   : {created}"
-            )
-
-            print(
-                "============================================"
-                "\n"
-            )
-
-            return jsonify({
-                "ok":
-                    True,
-
-                "created":
-                    created,
-
-                "incident_id":
-                    incident_id,
-
-                "incident":
-                    serialize_document(
-                        incident
-                    ),
-            }), 200
-
-        except Exception as exc:
-
-            print(
-                "\n"
-                "========== IMMEDIATE "
-                "INCIDENT ERROR =========="
-            )
-
-            print(
-                f"Error: {exc}"
-            )
-
-            print(
-                "============================================"
-                "\n"
-            )
-
-            return jsonify({
-                "error":
-                    "INCIDENT_CREATE_FAILED",
-
-                "message":
-                    str(exc),
-            }), 500
-
-    # ========================================================
-    # FINALIZED EVENT
-    # ========================================================
-
-    incident_id = (
-        data.get(
-            "incident_id"
-        )
-        or stream.get(
-            "incident_id"
-        )
-    )
-
-    payload = build_payload(
-        stream,
-        event,
-    )
-
-    public_clip = (
-        copy_clip_to_public_uploads(
-            event.get("video_clip")
-        )
-    )
-
+def update_incident_evidence(incident_id, camera_id, payload, public_clip):
     update_fields = {}
 
-    for key in [
+    for key in (
         "confidence",
         "speed_before",
         "speed_after",
@@ -541,736 +158,516 @@ def internal_stream_event():
         "collision_proximity",
         "persistent_abnormal_motion",
         "severity",
-    ]:
-
-        value = payload.get(
-            key
-        )
-
-        if value is not None:
-            update_fields[key] = (
-                value
-            )
+        "severity_score",
+        "evidence",
+    ):
+        if payload.get(key) is not None:
+            update_fields[key] = payload[key]
 
     if public_clip:
-        update_fields[
-            "video_clip"
-        ] = public_clip
+        update_fields["video_clip"] = public_clip
 
-    if not incident_id:
+    if not update_fields:
+        return None
+
+    updated = incidents_collection().find_one_and_update(
+        {
+            "incident_id": incident_id,
+            "camera_id": camera_id,
+        },
+        {"$set": update_fields},
+        return_document=ReturnDocument.AFTER,
+    )
+
+    return serialize_document(updated) if updated else None
+
+
+def publish_final_event(stream, event):
+    payload = build_payload(stream, event)
+    event_key = event_key_for(stream, event)
+
+    public_clip = copy_clip_to_public_uploads(
+        event.get("video_clip")
+    )
+
+    if public_clip:
+        payload["video_clip"] = public_clip
+
+    incident_id = stream.get("incident_ids", {}).get(event_key)
+
+    try:
+        if incident_id:
+            incident = update_incident_evidence(
+                incident_id,
+                stream["camera_id"],
+                payload,
+                public_clip,
+            )
+
+            if incident:
+                stream.setdefault("published_events", set()).add(
+                    event_key
+                )
+                return incident
+
+        # Fallback for a missed immediate callback. The incident
+        # service should deduplicate using camera_id + event_id.
+        incident, created = create_incident_from_detection(payload)
+        incident_id = incident.get("incident_id")
+
+        if not incident_id:
+            return None
+
+        remember_event_incident(stream, event_key, incident_id)
+
+        if not created:
+            updated = update_incident_evidence(
+                incident_id,
+                stream["camera_id"],
+                payload,
+                public_clip,
+            )
+            if updated:
+                incident = updated
+
+        stream.setdefault("published_events", set()).add(event_key)
+        return incident
+
+    except Exception as exc:
+        print(f"FINAL EVENT PUBLISH ERROR: {exc}", flush=True)
+        return None
+
+
+def publish_stream_events(stream, status):
+    for event in status.get("events", []):
+        event_key = event_key_for(stream, event)
+
+        if event_key in stream.setdefault("published_events", set()):
+            continue
+
+        publish_final_event(stream, event)
+
+
+@stream_bp.post("/internal/event")
+def internal_stream_event():
+    data = request.get_json(silent=True) or {}
+
+    stream_id = str(data.get("stream_id", "")).strip()
+    token = str(data.get("token", "")).strip()
+    event_type = str(data.get("event_type", "")).strip().lower()
+    event = data.get("event") or {}
+
+    if not stream_id:
+        return jsonify({"error": "STREAM_ID_REQUIRED"}), 400
+
+    with STREAMS_LOCK:
+        stream = STREAMS.get(stream_id)
+
+    if stream is None:
+        return jsonify({"error": "STREAM_NOT_FOUND"}), 404
+
+    if token != stream.get("callback_token"):
+        return jsonify({"error": "INVALID_CALLBACK_TOKEN"}), 403
+
+    if event_type not in {"detected", "finalized"}:
+        return jsonify({"error": "INVALID_EVENT_TYPE"}), 400
+
+    event_key = event_key_for(stream, event)
+    payload = build_payload(stream, event)
+
+    if event_type == "detected":
+        # The immediate event must not overwrite evidence uploaded later.
+        payload["video_clip"] = None
 
         try:
-            incident, created = (
-                create_incident_from_detection(
-                    payload
-                )
+            incident, created = create_incident_from_detection(payload)
+            incident_id = incident.get("incident_id")
+
+            if not incident_id:
+                return jsonify({"error": "INCIDENT_ID_MISSING"}), 500
+
+            remember_event_incident(stream, event_key, incident_id)
+
+            print(
+                f"ACCIDENT DETECTED | stream={stream_id} "
+                f"| event={event_key} | incident={incident_id} "
+                f"| created={created}",
+                flush=True,
             )
-
-            incident_id = (
-                incident.get(
-                    "incident_id"
-                )
-            )
-
-            if update_fields:
-                updated = (
-                    incidents_collection()
-                    .find_one_and_update(
-                        {
-                            "incident_id":
-                                incident_id
-                        },
-                        {
-                            "$set":
-                                update_fields
-                        },
-                        return_document=
-                            ReturnDocument.AFTER,
-                    )
-                )
-
-                if updated:
-                    incident = (
-                        serialize_document(
-                            updated
-                        )
-                    )
 
             return jsonify({
-                "ok":
-                    True,
-
-                "created":
-                    created,
-
-                "incident_id":
-                    incident_id,
-
-                "incident":
-                    incident,
+                "ok": True,
+                "created": created,
+                "event_id": event_key,
+                "incident_id": incident_id,
+                "incident": serialize_document(incident),
             }), 200
 
         except Exception as exc:
-
+            print(f"INCIDENT CREATE ERROR: {exc}", flush=True)
             return jsonify({
-                "error":
-                    "INCIDENT_FINALIZE_FAILED",
-
-                "message":
-                    str(exc),
+                "error": "INCIDENT_CREATE_FAILED",
+                "message": str(exc),
             }), 500
 
-    # Update existing immediate incident.
+    # Finalized event: resolve the incident for this event only.
+    incident_id = (
+        data.get("incident_id")
+        or stream.get("incident_ids", {}).get(event_key)
+    )
+
+    public_clip = copy_clip_to_public_uploads(
+        event.get("video_clip")
+    )
+
     try:
-
-        updated = (
-            incidents_collection()
-            .find_one_and_update(
-                {
-                    "incident_id":
-                        incident_id
-                },
-                {
-                    "$set":
-                        update_fields
-                },
-                return_document=
-                    ReturnDocument.AFTER,
+        if incident_id:
+            incident = update_incident_evidence(
+                incident_id,
+                stream["camera_id"],
+                payload,
+                public_clip,
             )
-        )
 
-        if updated is None:
-            return jsonify({
-                "error":
-                    "INCIDENT_NOT_FOUND"
-            }), 404
+            if incident is None:
+                return jsonify({
+                    "error": "INCIDENT_NOT_FOUND",
+                    "incident_id": incident_id,
+                }), 404
+        else:
+            # Fallback if the immediate event did not create an incident.
+            if public_clip:
+                payload["video_clip"] = public_clip
 
-        print(
-            "\n"
-            "========== INCIDENT "
-            "EVIDENCE ATTACHED =========="
-        )
+            incident, created = create_incident_from_detection(payload)
+            incident_id = incident.get("incident_id")
 
-        print(
-            f"INCIDENT : {incident_id}"
-        )
+            if not incident_id:
+                return jsonify({"error": "INCIDENT_ID_MISSING"}), 500
 
-        print(
-            f"CLIP     : {public_clip}"
-        )
+            remember_event_incident(stream, event_key, incident_id)
 
-        print(
-            "============================================"
-            "\n"
-        )
+            if not created:
+                updated = update_incident_evidence(
+                    incident_id,
+                    stream["camera_id"],
+                    payload,
+                    public_clip,
+                )
+                if updated:
+                    incident = updated
+
+        stream.setdefault("published_events", set()).add(event_key)
 
         return jsonify({
-            "ok":
-                True,
-
-            "incident_id":
-                incident_id,
-
-            "incident":
-                serialize_document(
-                    updated
-                ),
+            "ok": True,
+            "event_id": event_key,
+            "incident_id": incident_id,
+            "incident": incident,
         }), 200
 
     except Exception as exc:
-
+        print(f"INCIDENT FINALIZATION ERROR: {exc}", flush=True)
         return jsonify({
-            "error":
-                "INCIDENT_UPDATE_FAILED",
-
-            "message":
-                str(exc),
+            "error": "INCIDENT_FINALIZATION_FAILED",
+            "message": str(exc),
         }), 500
 
 
-# ============================================================
-# START STREAM
-# ============================================================
-
-@stream_bp.post(
-    "/start"
-)
+@stream_bp.post("/start")
 def start_stream():
-
     if not require_live():
         return jsonify({
-            "error":
-                "FORBIDDEN",
-            "message":
-                "Live login required.",
+            "error": "FORBIDDEN",
+            "message": "Live login required.",
         }), 403
 
-    data = request.get_json(
-        silent=True
-    ) or {}
+    data = request.get_json(silent=True) or {}
 
-    camera_id = (
-        str(
-            data.get(
-                "camera_id",
-                "CAM_001",
-            )
-        ).strip()
-        or "CAM_001"
-    )
-    camera = cameras_collection().find_one(
-    {"camera_id": camera_id}
-)
+    camera_id = str(data.get("camera_id", "CAM_001")).strip()
+    source_name = str(data.get("source", "clip_01.mp4")).strip()
+
+    if not camera_id:
+        return jsonify({"error": "CAMERA_ID_REQUIRED"}), 400
+
+    camera = cameras_collection().find_one({"camera_id": camera_id})
+
     if camera is None:
         return jsonify({
-        "error": "CAMERA_NOT_FOUND",
-        "message": (
-            f"Camera '{camera_id}' is not registered. "
-            "Add it in Camera Management first."
-        ),
-    }), 400
-    
-    source_name = (
-        str(
-            data.get(
-                "source",
-                "clip_01.mp4",
-            )
-        ).strip()
-    )
-
-    paths = resolve_paths()
-
-    sample_video_dir = (
-        paths["sample_video_dir"]
-    )
-
-    source_path = (
-        sample_video_dir
-        / Path(
-            source_name
-        ).name
-    ).resolve()
-
-    try:
-
-        source_path.relative_to(
-            sample_video_dir.resolve()
-        )
-
-    except ValueError:
-
-        return jsonify({
-            "error":
-                "INVALID_SOURCE",
-            "message":
-                "Source must be inside sample_videos.",
+            "error": "CAMERA_NOT_FOUND",
+            "message": f"Camera '{camera_id}' is not registered.",
         }), 400
 
-    if not source_path.exists():
+    paths = resolve_paths()
+    sample_dir = paths["sample_video_dir"].resolve()
 
-        return jsonify({
-            "error":
-                "SOURCE_NOT_FOUND",
-            "message":
-                str(source_path),
-        }), 404
-
-    python_path = (
-        paths["python_path"]
-    )
-
-    worker_path = (
-        paths["worker_path"]
-    )
-
-    if not python_path.exists():
-
-        return jsonify({
-            "error":
-                "ML_PYTHON_NOT_FOUND",
-            "message":
-                str(python_path),
-        }), 500
-
-    if not worker_path.exists():
-
-        return jsonify({
-            "error":
-                "STREAM_WORKER_NOT_FOUND",
-            "message":
-                str(worker_path),
-        }), 500
-
-    for existing in STREAMS.values():
-
-        if (
-            existing["camera_id"]
-            == camera_id
-            and existing["process"].poll()
-            is None
-        ):
-
-            return jsonify({
-                "error":
-                    "STREAM_ALREADY_RUNNING",
-
-                "stream_id":
-                    existing[
-                        "stream_id"
-                    ],
-            }), 409
-
-    stream_id = (
-        uuid.uuid4().hex[:10]
-    )
-
-    callback_token = (
-        uuid.uuid4().hex
-    )
-
-    status_dir = (
-        paths["upload_dir"]
-        / "streams"
-    )
-
-    status_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    status_file = (
-        status_dir
-        / f"{stream_id}.json"
-    )
-
-    log_file = (
-        status_dir
-        / f"{stream_id}.log"
-    )
-
-    write_status(
-        status_file,
-        {
-            "status":
-                "starting",
-
-            "stream_id":
-                stream_id,
-
-            "camera_id":
-                camera_id,
-
-            "source":
-                str(source_path),
-
-            "frames_processed":
-                0,
-
-            "last_timestamp":
-                0,
-
-            "accident_detected":
-                False,
-
-            "last_detection": {
-                "accident_detected":
-                    False,
-
-                "confidence":
-                    0.0,
-
-                "severity": {
-                    "level":
-                        "none",
-
-                    "score":
-                        0,
-
-                    "basis":
-                        [],
-                },
-            },
-
-            "events":
-                [],
-
-            "incident_id":
-                None,
-
-            "elapsed_seconds":
-                0,
-        },
-    )
-
-    callback_url = (
-        DEFAULT_CALLBACK_URL
-    )
-
-    command = [
-        str(python_path),
-
-        str(worker_path),
-
-        "--source",
-        str(source_path),
-
-        "--camera-id",
-        camera_id,
-
-        "--status-file",
-        str(status_file),
-
-        "--inference-stride",
-        "2",
-
-        "--callback-url",
-        callback_url,
-
-        "--callback-token",
-        callback_token,
-
-        "--stream-id",
-        stream_id,
-    ]
+    source_path = (sample_dir / Path(source_name).name).resolve()
 
     try:
+        source_path.relative_to(sample_dir)
+    except ValueError:
+        return jsonify({"error": "INVALID_SOURCE"}), 400
 
-        log_handle = open(
-            log_file,
-            "a",
-            encoding="utf-8",
-        )
-
-        process = subprocess.Popen(
-            command,
-            cwd=str(
-                paths["ml_dir"]
-            ),
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-
-    except Exception as exc:
-
-        write_status(
-            status_file,
-            {
-                "status":
-                    "failed",
-
-                "stream_id":
-                    stream_id,
-
-                "camera_id":
-                    camera_id,
-
-                "source":
-                    str(source_path),
-
-                "frames_processed":
-                    0,
-
-                "last_timestamp":
-                    0,
-
-                "accident_detected":
-                    False,
-
-                "events":
-                    [],
-
-                "error":
-                    str(exc),
-            },
-        )
-
+    if not source_path.is_file():
         return jsonify({
-            "error":
-                "ML_START_FAILED",
+            "error": "SOURCE_NOT_FOUND",
+            "message": str(source_path),
+        }), 404
 
-            "message":
-                str(exc),
+    python_path = paths["python_path"]
+    worker_path = paths["worker_path"]
+
+    if not python_path.is_file():
+        return jsonify({
+            "error": "ML_PYTHON_NOT_FOUND",
+            "message": str(python_path),
         }), 500
 
-    STREAMS[stream_id] = {
+    if not worker_path.is_file():
+        return jsonify({
+            "error": "STREAM_WORKER_NOT_FOUND",
+            "message": str(worker_path),
+        }), 500
 
-        "stream_id":
-            stream_id,
+    try:
+        max_streams = max(
+            1, int(os.getenv("MAX_CONCURRENT_STREAMS", "4"))
+        )
+    except ValueError:
+        max_streams = 4
 
-        "camera_id":
-            camera_id,
+    with STREAMS_LOCK:
+        active_streams = [
+            item for item in STREAMS.values()
+            if item["process"].poll() is None
+        ]
 
-        "source":
-            str(source_path),
+        for item in active_streams:
+            if item["camera_id"] == camera_id:
+                return jsonify({
+                    "error": "STREAM_ALREADY_RUNNING",
+                    "stream_id": item["stream_id"],
+                }), 409
 
-        "status_file":
-            status_file,
+        if len(active_streams) >= max_streams:
+            return jsonify({
+                "error": "STREAM_CAPACITY_REACHED",
+                "message": (
+                    f"Maximum concurrent streams: {max_streams}. "
+                    "Benchmark hardware before increasing this limit."
+                ),
+                "active_streams": len(active_streams),
+                "max_concurrent_streams": max_streams,
+            }), 429
 
-        "log_file":
-            log_file,
+        stream_id = uuid.uuid4().hex[:10]
+        callback_token = uuid.uuid4().hex
 
-        "process":
-            process,
+        status_dir = paths["upload_dir"] / "streams"
+        status_dir.mkdir(parents=True, exist_ok=True)
 
-        "log_handle":
-            log_handle,
+        status_file = status_dir / f"{stream_id}.json"
+        log_file = status_dir / f"{stream_id}.log"
 
-        "published_events":
-            set(),
+        write_status(status_file, {
+            "status": "starting",
+            "stream_id": stream_id,
+            "camera_id": camera_id,
+            "source": str(source_path),
+            "frames_processed": 0,
+            "last_timestamp": 0,
+            "accident_detected": False,
+            "last_detection": {
+                "accident_detected": False,
+                "confidence": 0.0,
+                "severity": {
+                    "level": "none",
+                    "score": 0,
+                    "basis": [],
+                },
+            },
+            "events": [],
+            "incident_id": None,
+            "elapsed_seconds": 0,
+        })
 
-        "callback_token":
-            callback_token,
+        command = [
+            str(python_path),
+            str(worker_path),
+            "--source", str(source_path),
+            "--camera-id", camera_id,
+            "--status-file", str(status_file),
+            "--inference-stride", "2",
+            "--callback-url", DEFAULT_CALLBACK_URL,
+            "--callback-token", callback_token,
+            "--stream-id", stream_id,
+        ]
 
-        "incident_id":
-            None,
-    }
+        log_handle = None
+
+        try:
+            log_handle = log_file.open("a", encoding="utf-8")
+
+            process = subprocess.Popen(
+                command,
+                cwd=str(paths["ml_dir"]),
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+
+        except Exception as exc:
+            if log_handle:
+                log_handle.close()
+
+            write_status(status_file, {
+                "status": "failed",
+                "stream_id": stream_id,
+                "camera_id": camera_id,
+                "error": str(exc),
+                "frames_processed": 0,
+                "events": [],
+            })
+
+            return jsonify({
+                "error": "ML_START_FAILED",
+                "message": str(exc),
+            }), 500
+
+        STREAMS[stream_id] = {
+            "stream_id": stream_id,
+            "camera_id": camera_id,
+            "source": str(source_path),
+            "status_file": status_file,
+            "log_file": log_file,
+            "process": process,
+            "log_handle": log_handle,
+            "published_events": set(),
+            "incident_ids": {},
+            "callback_token": callback_token,
+            "incident_id": None,
+        }
 
     print(
-        "\n========== STREAM STARTED =========="
-    )
-
-    print(
-        f"STREAM ID     : {stream_id}"
-    )
-
-    print(
-        f"CAMERA        : {camera_id}"
-    )
-
-    print(
-        f"CALLBACK URL  : {callback_url}"
-    )
-
-    print(
-        "====================================\n"
+        f"STREAM STARTED | id={stream_id} | camera={camera_id}",
+        flush=True,
     )
 
     return jsonify({
-        "ok":
-            True,
-
-        "stream_id":
-            stream_id,
-
-        "camera_id":
-            camera_id,
-
-        "source":
-            source_name,
-
-        "status":
-            "starting",
+        "ok": True,
+        "stream_id": stream_id,
+        "camera_id": camera_id,
+        "source": source_name,
+        "status": "starting",
     }), 201
 
 
-# ============================================================
-# STREAM STATUS
-# ============================================================
-
-@stream_bp.get(
-    "/<stream_id>"
-)
-def stream_status(
-    stream_id
-):
-
+@stream_bp.get("/<stream_id>")
+def stream_status(stream_id):
     if not require_live():
         return jsonify({
-            "error":
-                "FORBIDDEN",
-            "message":
-                "Live login required.",
+            "error": "FORBIDDEN",
+            "message": "Live login required.",
         }), 403
 
-    stream = STREAMS.get(
-        stream_id
-    )
+    with STREAMS_LOCK:
+        stream = STREAMS.get(stream_id)
 
     if stream is None:
-        return jsonify({
-            "error":
-                "STREAM_NOT_FOUND"
-        }), 404
+        return jsonify({"error": "STREAM_NOT_FOUND"}), 404
 
-    status_file = (
-        stream["status_file"]
-    )
+    status_file = stream["status_file"]
 
-    if status_file.exists():
-
-        try:
-
+    try:
+        if status_file.exists():
             status = json.loads(
-                status_file.read_text(
-                    encoding="utf-8"
-                )
+                status_file.read_text(encoding="utf-8")
             )
-
-        except (
-            json.JSONDecodeError,
-            OSError,
-        ):
-
+        else:
             status = {
-                "status":
-                    "starting",
-
-                "stream_id":
-                    stream_id,
-
-                "camera_id":
-                    stream["camera_id"],
+                "status": "starting",
+                "stream_id": stream_id,
+                "camera_id": stream["camera_id"],
+                "events": [],
             }
-
-    else:
-
+    except (json.JSONDecodeError, OSError) as exc:
         status = {
-            "status":
-                "starting",
-
-            "stream_id":
-                stream_id,
-
-            "camera_id":
-                stream["camera_id"],
+            "status": "starting",
+            "stream_id": stream_id,
+            "camera_id": stream["camera_id"],
+            "status_read_error": str(exc),
+            "events": [],
         }
 
-    process = (
-        stream["process"]
-    )
+    process = stream["process"]
 
-    if process.poll() is not None:
+    if process.poll() is not None and status.get("status") == "starting":
+        status["status"] = "failed"
 
-        if (
-            status.get(
-                "status"
-            )
-            == "starting"
-        ):
+        log_file = stream.get("log_file")
+        if log_file and log_file.exists():
+            try:
+                status["error"] = log_file.read_text(
+                    encoding="utf-8"
+                )[-4000:]
+            except OSError:
+                pass
 
-            status["status"] = (
-                "failed"
-            )
+    publish_stream_events(stream, status)
 
-            log_file = (
-                stream.get(
-                    "log_file"
-                )
-            )
+    status["incident_ids"] = dict(stream.get("incident_ids", {}))
 
-            if (
-                log_file
-                and log_file.exists()
-            ):
-
-                try:
-
-                    status["error"] = (
-                        log_file.read_text(
-                            encoding="utf-8"
-                        )[-4000:]
-                    )
-
-                except OSError:
-                    pass
-
-    # Safety-net publish.
-    publish_stream_events(
-        stream,
-        status,
-    )
-
-    if stream.get(
-        "incident_id"
-    ):
-
-        status[
-            "incident_id"
-        ] = stream[
-            "incident_id"
-        ]
+    if stream.get("incident_id"):
+        status["incident_id"] = stream["incident_id"]
 
     return jsonify({
-        "ok":
-            True,
-
-        "stream_id":
-            stream_id,
-
+        "ok": True,
+        "stream_id": stream_id,
         **status,
     }), 200
 
 
-# ============================================================
-# STOP STREAM
-# ============================================================
-
-@stream_bp.post(
-    "/<stream_id>/stop"
-)
-def stop_stream(
-    stream_id
-):
-
+@stream_bp.post("/<stream_id>/stop")
+def stop_stream(stream_id):
     if not require_live():
         return jsonify({
-            "error":
-                "FORBIDDEN",
-
-            "message":
-                "Live login required.",
+            "error": "FORBIDDEN",
+            "message": "Live login required.",
         }), 403
 
-    stream = STREAMS.get(
-        stream_id
-    )
+    with STREAMS_LOCK:
+        stream = STREAMS.get(stream_id)
 
     if stream is None:
+        return jsonify({"error": "STREAM_NOT_FOUND"}), 404
+
+    process = stream["process"]
+
+    try:
+        if process.poll() is None:
+            process.terminate()
+
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+    except Exception as exc:
         return jsonify({
-            "error":
-                "STREAM_NOT_FOUND"
-        }), 404
+            "error": "STREAM_STOP_FAILED",
+            "message": str(exc),
+        }), 500
 
-    process = (
-        stream["process"]
-    )
-
-    if process.poll() is None:
-
-        process.terminate()
-
-        try:
-
-            process.wait(
-                timeout=5
-            )
-
-        except subprocess.TimeoutExpired:
-
-            process.kill()
-
-    log_handle = (
-        stream.get(
-            "log_handle"
-        )
-    )
-
+    log_handle = stream.get("log_handle")
     if log_handle:
-
         try:
             log_handle.close()
-        except Exception:
+        except OSError:
             pass
 
     return jsonify({
-        "ok":
-            True,
-
-        "stream_id":
-            stream_id,
-
-        "status":
-            "stopped",
+        "ok": True,
+        "stream_id": stream_id,
+        "status": "stopped",
     }), 200

@@ -62,13 +62,10 @@ export default function Hospitals() {
         <div>
           <span className="eyebrow">HOSPITAL REGISTRY</span>
           <h2>Registered hospitals</h2>
-          <p>Manage prototype emergency availability.</p>
         </div>
       </div>
 
-      <p className="muted-text" style={{ marginBottom: 12 }}>
-        Availability shown here comes from the records maintained in this system; it is not a live connection to hospital dispatch systems. Verify each facility's contact, coordinates, staffing and emergency status before using it for a real response.
-      </p>
+     
       <ErrorMessage message={error} />
       {notice && <p className="success-message">{notice}</p>}
 
@@ -80,10 +77,8 @@ export default function Hospitals() {
           <input required type="number" min="-90" max="90" step="any" placeholder="Latitude" value={form.latitude} onChange={(e) => setForm({ ...form, latitude: e.target.value })} />
           <input required type="number" min="-180" max="180" step="any" placeholder="Longitude" value={form.longitude} onChange={(e) => setForm({ ...form, longitude: e.target.value })} />
           <input required placeholder="Contact" value={form.contact} onChange={(e) => setForm({ ...form, contact: e.target.value })} />
-          <select value={form.facility_type} onChange={(e) => setForm({ ...form, facility_type: e.target.value, capabilities: e.target.value === "CLINIC" ? ["FIRST_AID"] : ["FIRST_AID", "EMERGENCY", "TRAUMA"] })}><option value="HOSPITAL">Hospital</option><option value="CLINIC">First-aid clinic</option></select>
         </div>
         <div style={{ display: "flex", gap: 16, flexWrap: "wrap", margin: "12px 0" }}>
-          {["FIRST_AID", "EMERGENCY", "TRAUMA", "PEDIATRIC", "BURN"].map((cap) => <label key={cap} style={{ display: "flex", gap: 6, alignItems: "center" }}><input type="checkbox" checked={form.capabilities.includes(cap)} onChange={() => toggleCapability(cap)} />{cap.replace("_", " ")}</label>)}
         </div>
         <button className="button primary" type="submit">Register facility</button>
       </form>
@@ -107,7 +102,6 @@ export default function Hospitals() {
               {(hospital.data_source === "DEMO" || String(hospital.name || "").includes("(DEMO)") || String(hospital.contact || "").includes("DEMO ONLY")) && (
                 <p className="muted-text"><strong>DEMO RECORD — replace with verified facility data</strong></p>
               )}
-              <p className="muted-text">{hospital.facility_type || "HOSPITAL"} · {(hospital.capabilities || ["FIRST_AID", "EMERGENCY", "TRAUMA"]).join(", ")}</p>
 
               <div className="detail-list compact">
                 <div className="detail-row">

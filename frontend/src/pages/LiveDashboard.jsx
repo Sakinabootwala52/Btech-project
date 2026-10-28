@@ -266,11 +266,10 @@ export default function LiveDashboard() {
         <div className="panel-header">
           <div>
             <h3>Configured cameras ({cameras.length})</h3>
-            <span>Loaded from the cameras collection in MongoDB. Demo video sources are labelled as simulated.</span>
           </div>
         </div>
         {cameras.length === 0 ? (
-          <p>No cameras are configured in MongoDB. Run `python seed.py` in the backend for four local demo cameras, or register camera records.</p>
+          <p></p>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12 }}>
             {cameras.map((camera) => (
@@ -310,10 +309,7 @@ export default function LiveDashboard() {
               Camera stream
             </h3>
 
-            <span>
-              For the demo, a sample video acts as
-              the CCTV source.
-            </span>
+            
           </div>
         </div>
 

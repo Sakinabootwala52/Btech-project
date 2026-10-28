@@ -177,19 +177,76 @@ def _assignment_payload(ambulance, incident, hospital):
 # ------------------------------------------------------------------
 # Operator: list vehicles and their current assignment
 # ------------------------------------------------------------------
+
+# ------------------------------------------------------------------
+# Read assignments: ambulance operator, admin, or hospital
+# ------------------------------------------------------------------
 @ambulance_sim_bp.get("/assignments")
-@require_operator
+@require_login()
 def list_assignments():
+    role = session.get("role")
+
+    # Hospitals may see only ambulances belonging to their hospital.
+    if role == "hospital":
+        hospital_id = current_hospital_id()
+
+        if not hospital_id:
+            return jsonify({
+                "error": "HOSPITAL_ID_MISSING",
+                "message": "Hospital account is not linked to a hospital.",
+            }), 403
+
+        ambulance_query = {"hospital_id": hospital_id}
+
+    elif role in {"ambulance", "admin"}:
+        ambulance_query = {}
+
+    else:
+        return jsonify({
+            "error": "FORBIDDEN",
+            "message": "You cannot view ambulance assignments.",
+        }), 403
+
     rows = []
-    for ambulance in ambulances_collection().find().sort([("hospital_id", 1), ("ambulance_id", 1)]):
+
+    ambulances = ambulances_collection().find(
+        ambulance_query
+    ).sort([
+        ("hospital_id", 1),
+        ("ambulance_id", 1),
+    ])
+
+    for ambulance in ambulances:
         incident = None
         hospital = None
-        if ambulance.get("incident_id"):
-            incident = incidents_collection().find_one({"incident_id": ambulance["incident_id"]})
+
+        incident_id = ambulance.get("incident_id")
+
+        if incident_id:
+            incident = incidents_collection().find_one({
+                "incident_id": incident_id,
+            })
+
         hospital = _hospital_for(incident, ambulance)
-        rows.append(_assignment_payload(ambulance, incident, hospital))
-    active = [row for row in rows if row["ambulance"].get("status") in ACTIVE_AMBULANCE_STATUSES]
-    return jsonify({"ambulances": rows, "active_count": len(active)}), 200
+
+        rows.append(
+            _assignment_payload(
+                ambulance,
+                incident,
+                hospital,
+            )
+        )
+
+    active = [
+        row for row in rows
+        if row["ambulance"].get("status")
+        in ACTIVE_AMBULANCE_STATUSES
+    ]
+
+    return jsonify({
+        "ambulances": rows,
+        "active_count": len(active),
+    }), 200
 
 
 # ------------------------------------------------------------------
@@ -297,9 +354,10 @@ def report_position(ambulance_id):
     incident = incidents_collection().find_one_and_update(
         {
             "incident_id": ambulance["incident_id"],
-            "ambulance_id": ambulance_id,
+            "ambulance_tracking.ambulance_id": ambulance_id,
             "ambulance_tracking.phase": phase,
         },
+        
         {
             "$set": {
                 "ambulance_tracking.position": position,

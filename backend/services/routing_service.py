@@ -120,7 +120,6 @@ def estimate_route(origin, destination, road_network=None, average_speed_kmh=DEF
                     "distance_km": round(result["road_distance_km"] + access_km + egress_km, 2),
                     "travel_time_min": round(result["travel_time_min"] + access_minutes, 2),
                     "routing_mode": "ROAD_GRAPH",
-                    "notice": "Estimated from the configured road graph; live traffic is not connected.",
                 }
     estimated_minutes = (straight_km / max(float(average_speed_kmh), 1.0)) * 60.0
     return {
