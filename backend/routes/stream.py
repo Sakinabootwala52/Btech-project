@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Blueprint, jsonify, request, session
+from flask import Blueprint, Response, jsonify, request, session
 from pymongo import ReturnDocument
 
 from config import Config
@@ -31,6 +31,21 @@ def require_live():
     return session.get("role") == "live"
 
 
+def find_ml_python(ml_dir, backend_dir):
+    """ML interpreter: ML_PYTHON from .env if set, else ml/.venv or ml/venv on Windows or macOS/Linux."""
+    configured = os.getenv("ML_PYTHON", "").strip()
+    if configured:
+        path = Path(configured)
+        return path if path.is_absolute() else (backend_dir / path).resolve()
+
+    candidates = [
+        ml_dir / env / sub
+        for env in (".venv", "venv")
+        for sub in (Path("Scripts") / "python.exe", Path("bin") / "python")
+    ]
+    return next((c for c in candidates if c.is_file()), candidates[0])
+
+
 def resolve_paths():
     backend_dir = Path(__file__).resolve().parents[1]
     project_root = backend_dir.parent
@@ -48,7 +63,7 @@ def resolve_paths():
         "project_root": project_root,
         "ml_dir": ml_dir,
         "sample_video_dir": project_root / "sample_videos",
-        "python_path": ml_dir / ".venv" / "Scripts" / "python.exe",
+        "python_path": find_ml_python(ml_dir, backend_dir),
         "worker_path": ml_dir / "stream_worker.py",
         "upload_dir": upload_dir.resolve(),
     }
@@ -374,6 +389,17 @@ def internal_stream_event():
         }), 500
 
 
+LIVE_SOURCE_PREFIXES = ("http://", "https://", "rtsp://")
+
+
+def is_live_source(value):
+    """True for a webcam index or a camera stream URL (phone camera demo)."""
+    value = (value or "").strip()
+    if value.isdigit() and len(value) <= 2:
+        return True
+    return value.lower().startswith(LIVE_SOURCE_PREFIXES) and " " not in value
+
+
 @stream_bp.post("/start")
 def start_stream():
     if not require_live():
@@ -401,18 +427,28 @@ def start_stream():
     paths = resolve_paths()
     sample_dir = paths["sample_video_dir"].resolve()
 
-    source_path = (sample_dir / Path(source_name).name).resolve()
+    # A live camera is either a webcam index ("0", "1") or a phone camera
+    # stream URL (for example http://192.168.1.5:8080/video from IP Webcam).
+    # Anything else must be a sample video inside sample_videos.
+    live_source = is_live_source(source_name)
 
-    try:
-        source_path.relative_to(sample_dir)
-    except ValueError:
-        return jsonify({"error": "INVALID_SOURCE"}), 400
+    if live_source:
+        source_arg = source_name
+    else:
+        source_path = (sample_dir / Path(source_name).name).resolve()
 
-    if not source_path.is_file():
-        return jsonify({
-            "error": "SOURCE_NOT_FOUND",
-            "message": str(source_path),
-        }), 404
+        try:
+            source_path.relative_to(sample_dir)
+        except ValueError:
+            return jsonify({"error": "INVALID_SOURCE"}), 400
+
+        if not source_path.is_file():
+            return jsonify({
+                "error": "SOURCE_NOT_FOUND",
+                "message": str(source_path),
+            }), 404
+
+        source_arg = str(source_path)
 
     python_path = paths["python_path"]
     worker_path = paths["worker_path"]
@@ -473,7 +509,7 @@ def start_stream():
             "status": "starting",
             "stream_id": stream_id,
             "camera_id": camera_id,
-            "source": str(source_path),
+            "source": source_arg,
             "frames_processed": 0,
             "last_timestamp": 0,
             "accident_detected": False,
@@ -494,7 +530,7 @@ def start_stream():
         command = [
             str(python_path),
             str(worker_path),
-            "--source", str(source_path),
+            "--source", source_arg,
             "--camera-id", camera_id,
             "--status-file", str(status_file),
             "--inference-stride", "2",
@@ -537,7 +573,7 @@ def start_stream():
         STREAMS[stream_id] = {
             "stream_id": stream_id,
             "camera_id": camera_id,
-            "source": str(source_path),
+            "source": source_arg,
             "status_file": status_file,
             "log_file": log_file,
             "process": process,
@@ -558,8 +594,33 @@ def start_stream():
         "stream_id": stream_id,
         "camera_id": camera_id,
         "source": source_name,
+        "live_source": live_source,
         "status": "starting",
     }), 201
+
+
+@stream_bp.get("/<stream_id>/preview")
+def stream_preview(stream_id):
+    """Latest camera frame with detection boxes, written by the stream worker."""
+    if not require_live():
+        return jsonify({"error": "FORBIDDEN"}), 403
+
+    with STREAMS_LOCK:
+        stream = STREAMS.get(stream_id)
+
+    if stream is None:
+        return jsonify({"error": "STREAM_NOT_FOUND"}), 404
+
+    preview_file = Path(stream["status_file"]).with_suffix(".jpg")
+
+    try:
+        data = preview_file.read_bytes()
+    except OSError:
+        return jsonify({"error": "PREVIEW_NOT_READY"}), 404
+
+    response = Response(data, mimetype="image/jpeg")
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @stream_bp.get("/<stream_id>")

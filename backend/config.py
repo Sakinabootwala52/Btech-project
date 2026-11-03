@@ -15,6 +15,8 @@ class Config:
     ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "1234")
     LIVE_USERNAME = os.getenv("LIVE_USERNAME", "live")
     LIVE_PASSWORD = os.getenv("LIVE_PASSWORD", "1234")
+    AMBULANCE_USERNAME = os.getenv("AMBULANCE_USERNAME", "ambulance")
+    AMBULANCE_PASSWORD = os.getenv("AMBULANCE_PASSWORD", "1234")
     ML_PYTHON = os.getenv("ML_PYTHON", "")
     ML_MAIN = os.getenv("ML_MAIN", "")
     ML_TIMEOUT_SECONDS = int(os.getenv("ML_TIMEOUT_SECONDS", "900"))

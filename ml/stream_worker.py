@@ -27,6 +27,43 @@ def make_event_id(camera_id, frame_index):
     ).hexdigest()[:24]
 
 
+PREVIEW_INTERVAL_SECONDS = 0.4
+PREVIEW_MAX_WIDTH = 720
+
+
+def write_preview(preview_path, frame, detections, evidence, accident_flagged):
+    """Save the latest frame with detection boxes so the Live page can show what YOLO sees."""
+    view = frame.copy()
+    alert = bool(accident_flagged or evidence.get("accident_detected"))
+    box_colour = (40, 40, 214) if alert else (60, 200, 60)   # BGR: red on alert, green otherwise
+
+    for det in detections:
+        x1, y1, x2, y2 = (int(v) for v in det["bbox"])
+        cv2.rectangle(view, (x1, y1), (x2, y2), box_colour, 2)
+        label = f"ID {det.get('track_id', '-')} {det.get('confidence', 0):.2f}"
+        cv2.putText(view, label, (x1, max(18, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, box_colour, 2)
+
+    banner = (
+        f"ACCIDENT DETECTED  conf {evidence.get('confidence', 0):.2f}"
+        if alert
+        else f"Monitoring  vehicles {len(detections)}  conf {evidence.get('confidence', 0):.2f}"
+    )
+    cv2.rectangle(view, (0, 0), (view.shape[1], 34), (20, 20, 20), -1)
+    cv2.putText(view, banner, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                (60, 60, 255) if alert else (255, 255, 255), 2)
+
+    if view.shape[1] > PREVIEW_MAX_WIDTH:
+        scale = PREVIEW_MAX_WIDTH / view.shape[1]
+        view = cv2.resize(view, (PREVIEW_MAX_WIDTH, int(view.shape[0] * scale)))
+
+    ok, jpg = cv2.imencode(".jpg", view, [cv2.IMWRITE_JPEG_QUALITY, 75])
+    if not ok:
+        return
+    temp_path = preview_path.with_name(preview_path.name + ".tmp")
+    temp_path.write_bytes(jpg.tobytes())
+    os.replace(str(temp_path), str(preview_path))
+
+
 def write_status(status_path, status_data):
     """Atomically write status JSON, retrying transient Windows locks."""
     status_path = Path(status_path)
@@ -250,15 +287,24 @@ def process_stream(
     callback_token=None,
     stream_id=None,
 ):
+    live_source = isinstance(source, int) or str(source).lower().startswith(
+        ("http://", "https://", "rtsp://")
+    )
+
     cap = cv2.VideoCapture(source)
 
     if not cap.isOpened():
         cap.release()
         raise RuntimeError(f"Could not open stream source: {source}")
 
+    if live_source:
+        # Keep only the newest frame so a live camera does not fall behind.
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
     try:
         fps = cap.get(cv2.CAP_PROP_FPS)
-        if not fps or fps <= 0:
+        # Network cameras often report 0 or a nonsense rate (e.g. 90000).
+        if not fps or fps <= 0 or fps > 120:
             fps = 25.0
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -298,6 +344,9 @@ def process_stream(
         started_at = time.time()
         last_status_write = 0.0
         status_interval = 0.5
+
+        preview_path = Path(status_path).with_suffix(".jpg")
+        last_preview_write = 0.0
 
         def current_status(status):
             return {
@@ -346,11 +395,21 @@ def process_stream(
 
         write_status(status_path, current_status("running"))
 
+        read_failures = 0
+
         while True:
             ok, frame = cap.read()
 
             if not ok:
+                # A phone camera over Wi-Fi can drop a frame now and then;
+                # retry for about 5 seconds before treating it as the end.
+                if live_source and read_failures < 50:
+                    read_failures += 1
+                    time.sleep(0.1)
+                    continue
                 break
+
+            read_failures = 0
 
             timestamp = frame_index / fps
             buffer.add(frame_index, timestamp, frame)
@@ -387,6 +446,14 @@ def process_stream(
             else:
                 detections = last_detections
                 evidence = last_evidence
+
+            if should_infer and time.time() - last_preview_write >= PREVIEW_INTERVAL_SECONDS:
+                try:
+                    write_preview(preview_path, frame, detections, evidence,
+                                  bool(events) or pending_event is not None)
+                except Exception as exc:   # a preview problem must never stop detection
+                    print(f"PREVIEW ERROR: {exc}", flush=True)
+                last_preview_write = time.time()
 
             # Start a new incident event.
             if (

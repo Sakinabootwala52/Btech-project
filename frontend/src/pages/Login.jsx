@@ -31,7 +31,7 @@ export default function Login() {
       <button className={role === "hospital" ? "selected" : ""} onClick={() => setRole("hospital")}>Hospital</button>
       <button className={role === "admin" ? "selected" : ""} onClick={() => setRole("admin")}>Admin</button>
       <button className={role === "live" ? "selected" : ""} onClick={() => setRole("live")}>Live Feed</button>
-     
+      <button className={role === "ambulance" ? "selected" : ""} onClick={() => setRole("ambulance")}>Ambulance</button>
     </div>
 
     <form onSubmit={submit} className="form-stack">
@@ -40,6 +40,7 @@ export default function Login() {
       {role === "hospital" && <small className="login-hint">All prototype hospital passwords: 1234</small>}
       {role === "live" && <small className="login-hint">Live feed: live / 1234</small>}
       {role === "admin" && <small className="login-hint">Prototype admin: admin / 1234</small>}
+      {role === "ambulance" && <small className="login-hint">Ambulance operator: ambulance / 1234</small>}
       {error && <div className="error-message"><span>{error}</span></div>}
       <button className="button primary" disabled={loading}>{loading ? "Signing in..." : "Sign in"}</button>
     </form>

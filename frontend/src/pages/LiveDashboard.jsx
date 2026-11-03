@@ -7,9 +7,13 @@ const SAMPLE_VIDEOS = Array.from(
     `clip_${String(index + 1).padStart(2, "0")}.mp4`
 );
 
+// Special value in the source list: use a phone camera / webcam instead of a sample clip.
+const LIVE_CAMERA = "__LIVE_CAMERA__";
+
 export default function LiveDashboard() {
   const [cameraId, setCameraId] = useState("CAM_001");
   const [source, setSource] = useState("clip_01.mp4");
+  const [liveUrl, setLiveUrl] = useState("");
   const [cameras, setCameras] = useState([]);
   const [cameraLoadError, setCameraLoadError] = useState("");
 
@@ -121,7 +125,7 @@ export default function LiveDashboard() {
           },
           body: JSON.stringify({
             camera_id: cameraId,
-            source,
+            source: source === LIVE_CAMERA ? liveUrl.trim() : source,
           }),
         }
       );
@@ -220,6 +224,43 @@ export default function LiveDashboard() {
   const isRunning =
     streamStatus === "starting" ||
     streamStatus === "running";
+
+  // Live preview: the worker saves the latest frame with detection boxes;
+  // fetch it about twice a second while the stream runs.
+  const [previewUrl, setPreviewUrl] = useState("");
+
+  useEffect(() => {
+    if (!streamId || !isRunning) return undefined;
+
+    let cancelled = false;
+    let currentUrl = "";
+
+    async function loadPreview() {
+      try {
+        const response = await fetch(
+          `${API_BASE_URL}/live/stream/${streamId}/preview`,
+          { credentials: "include", cache: "no-store" }
+        );
+        if (!response.ok || cancelled) return;
+        const blob = await response.blob();
+        if (cancelled) return;
+        const nextUrl = URL.createObjectURL(blob);
+        if (currentUrl) URL.revokeObjectURL(currentUrl);
+        currentUrl = nextUrl;
+        setPreviewUrl(nextUrl);
+      } catch {
+        // the preview is optional; detection keeps running without it
+      }
+    }
+
+    loadPreview();
+    const timer = window.setInterval(loadPreview, 500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [streamId, isRunning]);
 
   return (
     <section>
@@ -349,8 +390,29 @@ export default function LiveDashboard() {
                   {video}
                 </option>
               ))}
+              <option value={LIVE_CAMERA}>
+                Live phone camera / webcam
+              </option>
             </select>
           </label>
+
+          {source === LIVE_CAMERA && (
+            <label>
+              Camera stream URL
+
+              <input
+                value={liveUrl}
+                onChange={(e) => setLiveUrl(e.target.value)}
+                placeholder="http://192.168.1.5:8080/video  (or 0 for the laptop webcam)"
+                disabled={isRunning}
+                required
+              />
+
+              <small>
+                Phone and laptop must be on the same Wi-Fi or hotspot.
+              </small>
+            </label>
+          )}
 
           <div className="button-row">
             <button
@@ -360,7 +422,8 @@ export default function LiveDashboard() {
               disabled={
                 starting ||
                 stopping ||
-                isRunning
+                isRunning ||
+                (source === LIVE_CAMERA && !liveUrl.trim())
               }
             >
               {starting
@@ -389,6 +452,28 @@ export default function LiveDashboard() {
       {/* -------------------------------------------------- */}
       {/* LIVE STATUS                                       */}
       {/* -------------------------------------------------- */}
+
+      {streamId && previewUrl && (
+        <div
+          className="panel"
+          style={{ marginTop: 18, maxWidth: 760 }}
+        >
+          <div className="panel-header">
+            <div>
+              <span className="eyebrow">
+                LIVE VIEW
+              </span>
+              <h3>What the detector sees</h3>
+            </div>
+          </div>
+
+          <img
+            src={previewUrl}
+            alt="Live camera view with detected vehicles"
+            style={{ width: "100%", borderRadius: 8, display: "block" }}
+          />
+        </div>
+      )}
 
       {streamId && (
         <div
